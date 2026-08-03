@@ -1,6 +1,22 @@
 # GitHub Actions for Gradle builds
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/gradle/actions/badge)](https://scorecard.dev/viewer/?uri=github.com/gradle/actions)
+> [!IMPORTANT]
+> **This is an unofficial derivative of [gradle/actions](https://github.com/gradle/actions), not the official action.**
+> It is not published, endorsed or supported by Gradle Inc. For the official action, use `gradle/actions`.
+>
+> It is derived from tag **v5.0.2**, the last release whose caching implementation is MIT-licensed. From
+> v6.0.0 upstream moved caching into `gradle-actions-caching`, a closed-source component governed by the
+> [Gradle Technologies Terms of Use](https://gradle.com/legal/gradle-technologies-terms-of-use/), which for
+> private repositories is offered as a time-limited free preview. This derivative exists to stay on
+> MIT-licensed caching, and to carry npm security fixes that upstream never backported to v5.
+>
+> Changes relative to v5.0.2:
+> - Large bundle cache entries (`dependencies`, `transforms`, `kotlin-dsl`) are sharded into 16 entries on
+>   the trailing character of Gradle's content hash, so one changed artifact invalidates one shard rather
+>   than the whole bundle, and shards restore concurrently. See `sources/src/caching/`.
+> - npm vulnerabilities reduced from 21 (3 critical, 10 high) to 6, lockfile-only.
+>
+> See [NOTICE](NOTICE) for attribution and provenance.
 
 This repository contains a set of GitHub Actions that are useful for building Gradle projects on GitHub.
 
