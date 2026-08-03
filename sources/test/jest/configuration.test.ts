@@ -15,7 +15,7 @@ describe('input params', () => {
         it('fails on non-numeric input', () => {
             const t = () => {
                 inputParams.parseNumericInput('param-name', 'xyz', 88)
-            };
+            }
 
             expect(t).toThrow(TypeError)
             expect(t).toThrow("The value 'xyz' is not a valid numeric value for 'param-name'.")

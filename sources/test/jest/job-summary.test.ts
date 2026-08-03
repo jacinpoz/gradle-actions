@@ -23,19 +23,20 @@ const failedHelpBuild: BuildResult = {
 
 const longArgsBuild: BuildResult = {
     ...successfulHelpBuild,
-    requestedTasks: 'check publishMyLongNamePluginPublicationToMavenCentral publishMyLongNamePluginPublicationToPluginPortal',
+    requestedTasks:
+        'check publishMyLongNamePluginPublicationToMavenCentral publishMyLongNamePluginPublicationToPluginPortal'
 }
 
 const scanPublishDisabledBuild: BuildResult = {
     ...successfulHelpBuild,
     buildScanUri: '',
-    buildScanFailed: false,
+    buildScanFailed: false
 }
 
 const scanPublishFailedBuild: BuildResult = {
     ...successfulHelpBuild,
     buildScanUri: '',
-    buildScanFailed: true,
+    buildScanFailed: true
 }
 
 describe('renderSummaryTable', () => {
@@ -59,7 +60,7 @@ describe('renderSummaryTable', () => {
                         <td><a href="https://scans.gradle.com/s/abc123" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Build%20Scan%C2%AE-06A0CE?logo=Gradle" alt="Build Scan published" /></a></td>
                     </tr>
                 </table>
-            `);
+            `)
         })
         it('failed build', () => {
             const table = renderSummaryTable([failedHelpBuild])
@@ -80,7 +81,7 @@ describe('renderSummaryTable', () => {
                         <td><a href="https://scans.gradle.com/s/abc123" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Build%20Scan%C2%AE-06A0CE?logo=Gradle" alt="Build Scan published" /></a></td>
                     </tr>
                 </table>
-            `);
+            `)
         })
         describe('when build scan', () => {
             it('publishing disabled', () => {
@@ -102,7 +103,7 @@ describe('renderSummaryTable', () => {
                             <td><a href="https://scans.gradle.com" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Not%20published-lightgrey" alt="Build Scan not published" /></a></td>
                         </tr>
                     </table>
-                `);
+                `)
             })
             it('publishing failed', () => {
                 const table = renderSummaryTable([scanPublishFailedBuild])
@@ -123,7 +124,7 @@ describe('renderSummaryTable', () => {
                             <td><a href="https://docs.gradle.com/develocity/gradle-plugin/#troubleshooting" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Publish%20failed-orange" alt="Build Scan publish failed" /></a></td>
                         </tr>
                     </table>
-                `);
+                `)
             })
         })
         it('multiple builds', () => {
@@ -152,7 +153,7 @@ describe('renderSummaryTable', () => {
                         <td><a href="https://scans.gradle.com/s/abc123" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Build%20Scan%C2%AE-06A0CE?logo=Gradle" alt="Build Scan published" /></a></td>
                     </tr>
                 </table>
-            `);
+            `)
         })
         it('truncating long requested tasks', () => {
             const table = renderSummaryTable([longArgsBuild])
@@ -173,7 +174,7 @@ describe('renderSummaryTable', () => {
                         <td><a href="https://scans.gradle.com/s/abc123" rel="nofollow" target="_blank"><img src="https://img.shields.io/badge/Build%20Scan%C2%AE-06A0CE?logo=Gradle" alt="Build Scan published" /></a></td>
                     </tr>
                 </table>
-            `);
+            `)
         })
     })
 })

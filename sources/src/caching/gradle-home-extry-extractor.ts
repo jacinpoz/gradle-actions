@@ -9,6 +9,7 @@ import {cacheDebug, hashFileNames, isCacheDebuggingEnabled, restoreCache, saveCa
 import {BuildResult, loadBuildResults} from '../build-results'
 import {CacheConfig, ACTION_METADATA_DIR} from '../configuration'
 import {getCacheKeyBase} from './cache-key'
+import {resolveEntryPattern} from './cache-glob'
 import {versionIsAtLeast} from '../execution/gradle'
 
 const SKIP_RESTORE_VAR = 'GRADLE_BUILD_ACTION_SKIP_RESTORE'
@@ -237,11 +238,10 @@ abstract class AbstractEntryExtractor {
                 continue
             }
 
-            // Find all matching files for this cache entry definition
-            const globber = await glob.create(pattern, {
-                implicitDescendants: false
-            })
-            const matchingFiles = await globber.glob()
+            // Find all matching files for this cache entry definition.
+            // Resolved by reading only the directories the pattern names: see cache-glob.ts for why
+            // '@actions/glob' is an order of magnitude slower for these particular patterns.
+            const matchingFiles = resolveEntryPattern(pattern)
 
             if (matchingFiles.length === 0) {
                 cacheDebug(`No files found to cache for ${artifactType}`)
@@ -441,11 +441,8 @@ export class GradleHomeEntryExtractor extends AbstractEntryExtractor {
      */
     private async deleteWrapperZips(): Promise<void> {
         const wrapperZips = path.resolve(this.gradleUserHome, 'wrapper/dists/*/*/*.zip')
-        const globber = await glob.create(wrapperZips, {
-            implicitDescendants: false
-        })
 
-        for (const wrapperZip of await globber.glob()) {
+        for (const wrapperZip of resolveEntryPattern(wrapperZips)) {
             cacheDebug(`Deleting wrapper zip: ${wrapperZip}`)
             await tryDelete(wrapperZip)
         }

@@ -53,39 +53,34 @@ describe('gradle', () => {
         })
 
         describe('rc versions', () => {
-            versionsAreOrdered([
-                '8.10', '8.11-rc-1', '8.11-rc-2', '8.11', '8.11.1-rc-1', '8.11.1'
-            ])
+            versionsAreOrdered(['8.10', '8.11-rc-1', '8.11-rc-2', '8.11', '8.11.1-rc-1', '8.11.1'])
         })
 
         describe('milestone versions', () => {
             versionsAreOrdered([
-                '8.12.1', '8.12.2-milestone-1', '8.12.2', '8.13-milestone-1', '8.13-milestone-2', '8.13'
+                '8.12.1',
+                '8.12.2-milestone-1',
+                '8.12.2',
+                '8.13-milestone-1',
+                '8.13-milestone-2',
+                '8.13'
             ])
-            versionsAreOrdered([
-                '8.12.1', '8.12.2-milestone-1', '8.12.2-milestone-2', '8.12.2-rc-1', '8.12.2'
-            ])
+            versionsAreOrdered(['8.12.1', '8.12.2-milestone-1', '8.12.2-milestone-2', '8.12.2-rc-1', '8.12.2'])
         })
 
         describe('preview versions', () => {
-            versionsAreOrdered([
-                '8.12.1', '8.12.2-preview-1', '8.12.2', '8.13-preview-1', '8.13-preview-2', '8.13'
-            ])
-            versionsAreOrdered([
-                '8.12.1', '8.12.2-milestone-1', '8.12.2-preview-1', '8.12.2-rc-1', '8.12.2'
-            ])
+            versionsAreOrdered(['8.12.1', '8.12.2-preview-1', '8.12.2', '8.13-preview-1', '8.13-preview-2', '8.13'])
+            versionsAreOrdered(['8.12.1', '8.12.2-milestone-1', '8.12.2-preview-1', '8.12.2-rc-1', '8.12.2'])
         })
 
         describe('snapshot versions', () => {
+            versionsAreOrdered(['8.10.1', '8.10.2-20240828012138+0000', '8.10.2', '8.11-20240829002031+0000', '8.11'])
             versionsAreOrdered([
-                '8.10.1', '8.10.2-20240828012138+0000', '8.10.2', '8.11-20240829002031+0000', '8.11'
+                '9.0',
+                '9.1-branch-provider_api_migration_public_api_changes-20240826121451+0000',
+                '9.1'
             ])
-            versionsAreOrdered([
-                '9.0', '9.1-branch-provider_api_migration_public_api_changes-20240826121451+0000', '9.1'
-            ])
-            versionsAreNotOrdered([
-                '8.10.2-20240828012138+0000', '8.10.2-20240828010000+1000', '8.10.2-milestone-1'
-            ])
+            versionsAreNotOrdered(['8.10.2-20240828012138+0000', '8.10.2-20240828010000+1000', '8.10.2-milestone-1'])
         })
     })
 
@@ -99,7 +94,7 @@ describe('gradle', () => {
             const version = await parseGradleVersionFromOutput(output)!
             expect(version).toBe('8.9')
         })
-    
+
         it('patch version', async () => {
             const output = `
     ------------------------------------------------------------
@@ -109,7 +104,7 @@ describe('gradle', () => {
             const version = await parseGradleVersionFromOutput(output)!
             expect(version).toBe('8.9.1')
         })
-    
+
         it('rc version', async () => {
             const output = `
     ------------------------------------------------------------
@@ -119,7 +114,7 @@ describe('gradle', () => {
             const version = await parseGradleVersionFromOutput(output)!
             expect(version).toBe('8.9-rc-1')
         })
-    
+
         it('milestone version', async () => {
             const output = `
     ------------------------------------------------------------
@@ -129,7 +124,7 @@ describe('gradle', () => {
             const version = await parseGradleVersionFromOutput(output)!
             expect(version).toBe('8.0-milestone-6')
         })
-    
+
         it('snapshot version', async () => {
             const output = `
     ------------------------------------------------------------
@@ -139,7 +134,7 @@ describe('gradle', () => {
             const version = await parseGradleVersionFromOutput(output)!
             expect(version).toBe('8.10.2-20240828012138+0000')
         })
-    
+
         it('branch version', async () => {
             const output = `
     ------------------------------------------------------------
@@ -151,4 +146,3 @@ describe('gradle', () => {
         })
     })
 })
-
