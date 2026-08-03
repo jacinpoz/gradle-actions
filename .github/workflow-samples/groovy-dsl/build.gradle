@@ -1,0 +1,26 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+testing {
+    suites {
+        test {
+            useJUnit()
+        }
+    }
+}
+
+tasks.named("test").configure {
+    // Write marker file so we can detect if task was configured
+    file("task-configured.txt").text = "true"
+
+    doLast {
+        if (System.properties.verifyCachedBuild) {
+            throw new RuntimeException("Build was not cached: unexpected execution of test task")
+        }
+    }
+}

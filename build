@@ -1,0 +1,40 @@
+#!/bin/bash
+
+cd sources
+
+case "$1" in
+    all)
+        npm run all
+        ;;
+    act)
+        # Build and copy outputs to the dist directory
+        npm run build
+        cd ..
+        cp -r sources/dist .
+        # Run act
+        $@
+        # Revert the changes to the dist directory
+        git checkout -- dist
+        ;;
+    dist)
+        npm clean-install
+        npm run build
+        cd ..
+        cp -r sources/dist .
+        ;;
+    init-scripts)
+        cd test/init-scripts
+        ./gradlew check
+        ;;
+    install)
+        npm clean-install
+        npm run build
+        ;;
+    test)
+        shift
+        npm test -- $@
+        ;;
+    *)
+        npm run build
+        ;;
+esac

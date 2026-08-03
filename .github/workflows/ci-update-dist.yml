@@ -1,0 +1,82 @@
+name: CI-update-dist
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - 'main'
+    - 'prerelease/**'
+    - 'release/**'
+    paths-ignore:
+    - 'dist/**'
+
+permissions:
+  contents: read
+
+jobs:
+  update-dist:
+    # Only run for the Gradle repository; otherwise when users create pull requests from their `main` branch
+    # it would erroneously update `dist` on their branch (and the pull request)
+    if: github.repository == 'gradle/actions'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        token: ${{ secrets.BOT_GITHUB_TOKEN }}
+
+    - name: Set up Node.js
+      uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+      with:
+        node-version: 20
+        cache: npm
+        cache-dependency-path: sources/package-lock.json
+
+    - name: Install Develocity npm agent
+      run: |
+        npm exec -y -- pacote extract @gradle-tech/develocity-agent@3.0.1 ~/.node_libraries/@gradle-tech/develocity-agent
+
+    - name: Install npm dependencies
+      run: |
+        npm clean-install
+      working-directory: sources
+      env:
+        NODE_OPTIONS: '-r @gradle-tech/develocity-agent/preload'
+        DEVELOCITY_ACCESS_KEY: '${{ secrets.DV_SOLUTIONS_ACCESS_KEY }}'
+
+    - name: Build distribution
+      run: |
+        npm run check
+        npm run compile
+      working-directory: sources
+      env:
+        NODE_OPTIONS: '-r @gradle-tech/develocity-agent/preload'
+        DEVELOCITY_URL: 'https://ge.solutions-team.gradle.com'
+        DEVELOCITY_ACCESS_KEY: '${{ secrets.DV_SOLUTIONS_ACCESS_KEY }}'
+
+    - name: Copy the generated sources/dist directory to the top-level dist
+      run: |
+        cp -r sources/dist .
+
+    - name: Import GPG key to sign commits
+      uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6.3.0
+      with:
+        gpg_private_key: ${{ secrets.GH_BOT_PGP_PRIVATE_KEY }}
+        passphrase: ${{ secrets.GH_BOT_PGP_PASSPHRASE }}
+        git_user_signingkey: true
+        git_commit_gpgsign: true
+        git_config_global: true
+
+    # Commit and push changes; has no effect if the files did not change
+    # Important: The push event will not trigger any other workflows, see
+    # https://github.com/stefanzweifel/git-auto-commit-action?tab=readme-ov-file#commits-made-by-this-action-do-not-trigger-new-workflow-runs
+    - name: Commit & push changes
+      uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9 # v7.1.0
+      with:
+        commit_author: bot-githubaction <bot-githubaction@gradle.com>
+        commit_user_name: bot-githubaction
+        commit_user_email: bot-githubaction@gradle.com
+        commit_message: '[bot] Update dist directory'
+        file_pattern: dist

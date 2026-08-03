@@ -1,0 +1,98 @@
+name: Test detect java toolchains
+
+on:
+  workflow_call:
+    inputs:
+      cache-key-prefix:
+        type: string
+        default: '0'
+      runner-os:
+        type: string
+        default: '["ubuntu-latest"]'
+      skip-dist:
+        type: boolean
+        default: false
+
+env:
+  SKIP_DIST: ${{ inputs.skip-dist }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: detect-java-toolchain-${{ inputs.cache-key-prefix }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Test that pre-installed runner JDKs are detected
+  detect-toolchains-pre-installed-jdks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+    - name: List detected toolchains
+      shell: bash
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: | 
+        ./gradlew --info javaToolchains > output.txt
+        cat output.txt
+    - name: Verify detected toolchains
+      shell: bash
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: | 
+        grep -q 'Eclipse Temurin JDK 8' output.txt || (echo "::error::Did not detect preinstalled JDK 8" && exit 1)
+        grep -q 'Eclipse Temurin JDK 11' output.txt || (echo "::error::Did not detect preinstalled JDK 11" && exit 1)
+        grep -q 'Eclipse Temurin JDK 17' output.txt || (echo "::error::Did not detect preinstalled JDK 17" && exit 1)
+        grep -q 'Eclipse Temurin JDK 21' output.txt || (echo "::error::Did not detect preinstalled JDK 21" && exit 1)
+
+  # Test that JDKs provisioned by setup-java are detected
+  detect-toolchains-setup-java-jdks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Java 16
+      uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+      with:
+        distribution: 'temurin'
+        java-version: 16
+    - name: Setup Java 20
+      uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+      with:
+        distribution: 'temurin'
+        java-version: 20
+    - name: Setup Gradle
+      uses: ./setup-gradle
+    - name: List detected toolchains
+      shell: bash
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: | 
+        ./gradlew --info javaToolchains > output.txt
+        cat output.txt
+    - name: Verify setup JDKs are detected
+      shell: bash
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: | 
+        grep -q 'Eclipse Temurin JDK 16' output.txt || (echo "::error::Did not detect setup-java installed JDK 16" && exit 1)
+        grep -q 'Eclipse Temurin JDK 20' output.txt || (echo "::error::Did not detect setup-java installed JDK 20" && exit 1)
+    - name: Verify pre-installed toolchains are detected
+      shell: bash
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: | 
+        grep -q 'Eclipse Temurin JDK 8' output.txt || (echo "::error::Did not detect preinstalled JDK 8" && exit 1)
+        grep -q 'Eclipse Temurin JDK 11' output.txt || (echo "::error::Did not detect preinstalled JDK 11" && exit 1)
+        grep -q 'Eclipse Temurin JDK 17' output.txt || (echo "::error::Did not detect preinstalled JDK 17" && exit 1)
+        grep -q 'Eclipse Temurin JDK 21' output.txt || (echo "::error::Did not detect preinstalled JDK 21" && exit 1)

@@ -1,0 +1,77 @@
+name: Demo adding Build Scan® comment to PR
+on:
+  pull_request:
+    types: [assigned, review_requested]
+
+permissions:
+  contents: read
+
+jobs:
+  build-distribution:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Build and upload distribution
+      uses: ./.github/actions/build-dist
+
+  successful-build-with-always-comment:
+    permissions:
+      pull-requests: write
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        add-job-summary-as-pr-comment: always
+    - name: Run build with Gradle wrapper
+      id: gradle
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew build --scan
+
+  successful-build-with-comment-on-failure:
+    permissions:
+      pull-requests: write
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        add-job-summary-as-pr-comment: on-failure
+    - name: Run build with Gradle wrapper
+      id: gradle
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew build --scan
+
+  failing-build-with-comment-on-failure:
+    permissions:
+      pull-requests: write
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        add-job-summary-as-pr-comment: on-failure
+    - name: Run build with Gradle wrapper
+      id: gradle
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew no-a-real-task --scan
+      continue-on-error: true

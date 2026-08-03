@@ -1,0 +1,27 @@
+genesis-gradle-actions
+======================
+
+This repository is derived from gradle/actions at tag v5.0.2:
+
+    https://github.com/gradle/actions/tree/v5.0.2
+
+Copyright the original authors, licensed under the MIT License (see LICENSE).
+
+Provenance note
+---------------
+v5.0.2 is the last release of gradle/actions whose caching implementation is
+MIT-licensed. From v6.0.0 onwards the caching implementation was extracted into
+'gradle-actions-caching', a closed-source component governed by the Gradle
+Technologies Terms of Use. This repository is seeded from the v5.0.2 source
+tree only and deliberately contains no v6 code or artifacts. Do not merge,
+cherry-pick or copy from gradle/actions v6 or later.
+
+Third-party design attribution
+------------------------------
+The sharded cache-entry work in sources/src/caching/ was informed by the
+layered-cache approach in burrunan/gradle-cache-action (Apache-2.0):
+
+    https://github.com/burrunan/gradle-cache-action
+
+No code was copied from that project; the sharding implementation here is an
+independent design based on Gradle's content-addressed cache directory layout.

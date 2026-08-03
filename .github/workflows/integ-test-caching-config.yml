@@ -1,0 +1,184 @@
+name: Test caching configuration
+
+on:
+  workflow_call:
+    inputs:
+      cache-key-prefix:
+        type: string
+        default: '0'
+      runner-os:
+        type: string
+        default: '["ubuntu-latest"]'
+      skip-dist:
+        type: boolean
+        default: false
+
+env:
+  SKIP_DIST: ${{ inputs.skip-dist }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: caching-config-${{ inputs.cache-key-prefix }}
+
+permissions:
+  contents: read
+
+jobs:
+  caching-config-seed-build:
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false # For testing, allow writing cache entries on non-default branches
+        # Add "application" to main cache entry but omit "notifications"
+        gradle-home-cache-includes: |
+            caches
+            application
+        # Exclude build-cache from main cache entry
+        gradle-home-cache-excludes: |
+            caches/build-cache-*
+            caches/*/executionHistory
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test
+
+  # Test that the gradle-user-home cache will cache dependencies, by running build with --offline
+  caching-config-verify-build:
+    needs: caching-config-seed-build
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        # Use the same configuration as used in the seed build
+        gradle-home-cache-includes: |
+            caches
+            application
+        gradle-home-cache-excludes: |
+            caches/build-cache-*
+            caches/*/executionHistory
+        cache-read-only: true
+    - name: Execute Gradle build with --offline
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test --offline
+
+  # Test that build scans are captured when caching is explicitly disabled
+  caching-config-cache-disabled:
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-disabled: true
+    - name: Build using Gradle wrapper
+      id: gradle
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew help
+    - name: Check Build Scan url is captured
+      if: ${{ !steps.gradle.outputs.build-scan-url }}
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        script: |
+          core.setFailed('No Build Scan detected')
+
+  # Test that build scans are captured when caching is disabled because Gradle User Home already exists
+  caching-config-cache-disabled-pre-existing-gradle-home:
+    runs-on: ubuntu-latest # This test only runs on Ubuntu
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Create dummy Gradle User Home
+      run: mkdir -p ~/.gradle/caches
+    - name: Setup Gradle
+      uses: ./setup-gradle
+    - name: Build using Gradle wrapper
+      id: gradle
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew help
+    - name: Check Build Scan url is captured
+      if: ${{ !steps.gradle.outputs.build-scan-url }}
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        script: |
+          core.setFailed('No Build Scan detected')
+
+  # Test seed the cache with cache-write-only and verify with cache-read-only
+  caching-config-seed-write-only:
+    env:
+      GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: caching-config-write-only-${{ inputs.cache-key-prefix }}
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-write-only: true
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test
+
+  caching-config-verify-write-only:
+    env:
+      GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: caching-config-write-only-${{ inputs.cache-key-prefix }}
+    needs: caching-config-seed-write-only
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: true
+    - name: Execute Gradle build with --offline
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test --offline
+

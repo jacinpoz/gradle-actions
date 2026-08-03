@@ -1,0 +1,116 @@
+name: Demo Job Summary, for Gradle builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-distribution:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Build and upload distribution
+      uses: ./.github/actions/build-dist
+
+  many-gradle-builds:
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false
+        cache-cleanup: 'on-success'
+    - name: Build kotlin-dsl project
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew assemble
+    - name: Build kotlin-dsl project without Build Scan®
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew assemble check --no-scan
+    - name: Build kotlin-dsl project with Build Scan® publish failure
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew check -Dgradle.enterprise.url=https://not.valid.server
+    - name: Build groovy-dsl project
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew assemble
+    - name: Build kotlin-dsl project with multiple gradle invocations
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: | 
+         ./gradlew tasks --no-daemon
+         ./gradlew help check
+         ./gradlew wrapper --gradle-version 8.7 --gradle-distribution-sha256-sum 544c35d6bd849ae8a5ed0bcea39ba677dc40f49df7d1835561582da2009b961d
+    - name: Fail groovy-dsl project
+      working-directory: .github/workflow-samples/groovy-dsl
+      continue-on-error: true
+      run: ./gradlew not-a-real-task
+    - name: Dependency submission
+      uses: ./dependency-submission
+      with:
+        build-root-directory: .github/workflow-samples/groovy-dsl
+        dependency-graph: generate-and-upload
+
+  successful-builds-with-no-summary:
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        add-job-summary: on-failure
+    - name: Build kotlin-dsl project
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew assemble
+    - name: Build kotlin-dsl project without Build Scan®
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew assemble check --no-scan
+
+  pre-existing-gradle-home:
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Pre-create Gradle User Home
+      shell: bash
+      run: |
+        mkdir ~/.gradle
+        mkdir ~/.gradle/caches
+        touch ~/.gradle/caches/dummy.txt
+    - name: Setup Gradle
+      uses: ./setup-gradle
+    - name: Run build
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew assemble
+
+  cache-read-only:
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: true
+    - name: Build kotlin-dsl project
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew assemble

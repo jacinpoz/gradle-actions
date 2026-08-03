@@ -1,0 +1,71 @@
+name: Test restore java toolchains
+
+on:
+  workflow_call:
+    inputs:
+      cache-key-prefix:
+        type: string
+        default: '0'
+      runner-os:
+        type: string
+        default: '["ubuntu-latest"]'
+      skip-dist:
+        type: boolean
+        default: false
+
+env:
+  SKIP_DIST: ${{ inputs.skip-dist }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: restore-java-toolchain-${{ inputs.cache-key-prefix }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_JOB: restore-java-toolchain
+
+permissions:
+  contents: read
+
+jobs:
+  restore-java-toolchain-seed-build:
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+      with:
+        java-version: '17'
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false # For testing, allow writing cache entries on non-default branches
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/java-toolchain
+      run: ./gradlew test --info
+
+  # Test that the gradle-user-home cache will cache the toolchain, by running build with --offline
+  restore-java-toolchain-verify-build:
+    needs: restore-java-toolchain-seed-build
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+      with:
+        java-version: '17'
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: true
+    - name: Execute Gradle build with --offline
+      working-directory: .github/workflow-samples/java-toolchain
+      run: ./gradlew test --info --offline

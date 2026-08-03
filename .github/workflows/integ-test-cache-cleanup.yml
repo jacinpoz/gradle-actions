@@ -1,0 +1,113 @@
+name: Test cache cleanup
+
+on:
+  workflow_call:
+    inputs:
+      cache-key-prefix:
+        type: string
+        default: '0'
+      runner-os:
+        type: string
+        default: '["ubuntu-latest"]'
+      skip-dist:
+        type: boolean
+        default: false
+
+env:
+  SKIP_DIST: ${{ inputs.skip-dist }}
+  # Requires a fresh cache entry each run
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: cache-cleanup-${{ inputs.cache-key-prefix }}-${{github.run_number}}
+  GRADLE_BUILD_ACTION_CACHE_KEY_JOB: cache-cleanup
+
+permissions:
+  contents: read
+
+jobs:
+  cache-cleanup-full-build:
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false # For testing, allow writing cache entries on non-default branches
+    - name: Build with 3.1
+      working-directory: sources/test/jest/resources/cache-cleanup
+      run: ./gradlew --no-daemon --build-cache -Dcommons_math3_version="3.1" build
+
+  # Second build will use the cache from the first build, but cleanup should remove unused artifacts
+  cache-cleanup-assemble-build:
+    env:
+      GRADLE_BUILD_ACTION_CACHE_KEY_JOB_EXECUTION: ${{github.sha}}_1
+    needs: cache-cleanup-full-build
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false
+        cache-cleanup: 'on-success'
+    - name: Build with 3.1.1
+      working-directory: sources/test/jest/resources/cache-cleanup
+      run: ./gradlew --no-daemon --build-cache -Dcommons_math3_version="3.1.1" build
+
+  # Third build will restore cache entry from second, and verify stale content removed
+  cache-cleanup-check-clean-cache:
+    env:
+      GRADLE_BUILD_ACTION_CACHE_KEY_JOB_EXECUTION: ${{github.sha}}_1
+    needs: cache-cleanup-assemble-build
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        os: ${{fromJSON(inputs.runner-os)}}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: true
+    - name: Report Gradle User Home
+      shell: bash
+      run: |
+        du -hc $GRADLE_USER_HOME/caches/modules-2
+        du -hc $GRADLE_USER_HOME/wrapper/dists
+    - name: Verify cleaned cache
+      shell: bash
+      run: |
+        if [ ! -e $GRADLE_USER_HOME/caches/modules-2/files-2.1/org.apache.commons/commons-math3/3.1.1 ]; then
+          echo "::error ::Should find commons-math3 3.1.1 in cache"
+          exit 1
+        fi
+        if [ -e $GRADLE_USER_HOME/caches/modules-2/files-2.1/org.apache.commons/commons-math3/3.1 ]; then
+          echo "::error ::Should NOT find commons-math3 3.1 in cache"
+          exit 1
+        fi
+        if [ ! -e $GRADLE_USER_HOME/wrapper/dists/gradle-8.0.2-bin ]; then
+          echo "::error ::Should find gradle-8.0.2 in wrapper/dists"
+          exit 1
+        fi

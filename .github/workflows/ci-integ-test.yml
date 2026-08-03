@@ -1,0 +1,45 @@
+name: CI-integ-test
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+    - 'main'
+    - 'release/**'
+    - 'dev/**' # Allow running tests on dev branches without a PR
+    paths-ignore:
+    - 'dist/**'
+
+concurrency:
+  group: integ-test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-distribution:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Build and upload distribution
+      if: ${{ needs.determine-suite.outputs.suite != 'full' }}
+      uses: ./.github/actions/build-dist
+
+  caching-integ-tests:
+    needs: build-distribution
+    uses: ./.github/workflows/suite-integ-test-caching.yml
+    with:
+      skip-dist: false
+    secrets: inherit
+
+  other-integ-tests:
+    permissions:
+      contents: write
+    needs: build-distribution
+    uses: ./.github/workflows/suite-integ-test-other.yml
+    with:
+      skip-dist: false
+    secrets: inherit

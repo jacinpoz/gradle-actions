@@ -1,0 +1,192 @@
+name: Test dependency graph
+
+on:
+  workflow_call:
+    inputs:
+      cache-key-prefix:
+        type: string
+        default: '0'
+      runner-os:
+        type: string
+        default: '["ubuntu-latest"]'
+      skip-dist:
+        type: boolean
+        default: false
+
+env:
+  SKIP_DIST: ${{ inputs.skip-dist }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: dependency-graph-${{ inputs.cache-key-prefix }}
+  GITHUB_DEPENDENCY_GRAPH_REF: 'refs/tags/v0.0.1' # Use a different ref to avoid updating the real dependency graph for the repository
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-graph-groovy-upload:
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle for dependency-graph generate
+      uses: ./setup-gradle
+      with:
+        dependency-graph: generate-and-upload
+    - name: Run gradle build
+      run: ./gradlew build
+      working-directory: .github/workflow-samples/groovy-dsl
+
+  dependency-graph-groovy-submit:
+    permissions:
+      contents: write
+    needs: [dependency-graph-groovy-upload]
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Submit dependency graphs
+      uses: ./setup-gradle
+      with:
+        dependency-graph: download-and-submit
+      env:
+        DEPENDENCY_GRAPH_DOWNLOAD_ARTIFACT_NAME: groovy-upload
+
+  dependency-graph-kotlin-generate-and-submit:
+    permissions:
+      contents: write
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle for dependency-graph generate
+      uses: ./setup-gradle
+      with:
+        dependency-graph: generate-and-submit
+    - name: Run gradle build
+      run: ./gradlew build
+      working-directory: .github/workflow-samples/kotlin-dsl
+
+  dependency-graph-multiple-builds:
+    permissions:
+      contents: write
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle for dependency-graph generate
+      uses: ./setup-gradle
+      with:
+        dependency-graph: generate-and-submit
+    - id: gradle-assemble
+      run: ./gradlew assemble
+      working-directory: .github/workflow-samples/groovy-dsl
+    - id: gradle-build
+      run: ./gradlew build
+      working-directory: .github/workflow-samples/groovy-dsl
+    - id: gradle-build-again
+      run: ./gradlew build
+      working-directory: .github/workflow-samples/groovy-dsl
+    - name: Check generated dependency graphs
+      shell: bash
+      run: |
+        echo "gradle-assemble report file: ${{ steps.gradle-assemble.outputs.dependency-graph-file }}"
+        echo "gradle-build report file: ${{ steps.gradle-build.outputs.dependency-graph-file }}"
+        echo "gradle-build-again report file: ${{ steps.gradle-build-again.outputs.dependency-graph-file }}"
+        ls -l dependency-graph-reports
+        if [ ! -e "${{ steps.gradle-assemble.outputs.dependency-graph-file }}" ]; then
+            echo "Did not find gradle-assemble dependency graph file"
+            exit 1
+        fi
+        if [ ! -e "${{ steps.gradle-build.outputs.dependency-graph-file }}" ]; then
+            echo "Did not find gradle-build dependency graph files"
+            exit 1
+        fi
+        if [ ! -e "${{ steps.gradle-build-again.outputs.dependency-graph-file }}" ]; then
+            echo "Did not find gradle-build-again dependency graph files"
+            exit 1
+        fi
+        
+  dependency-graph-config-cache:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest # Test is not compatible with Windows
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle for dependency-graph generate
+      uses: ./setup-gradle
+      with:
+        dependency-graph: generate-and-submit
+    - id: config-cache-store
+      run: ./gradlew assemble --configuration-cache
+      working-directory: .github/workflow-samples/groovy-dsl
+    - name: Check and delete generated dependency graph
+      shell: bash
+      run: |
+        if [ ! -e "${{ steps.config-cache-store.outputs.dependency-graph-file }}" ]; then
+            echo "Did not find config-cache-store dependency graph files"
+            exit 1
+        fi
+        rm ${{ steps.config-cache-store.outputs.dependency-graph-file }}
+    - id: config-cache-reuse
+      run: ./gradlew assemble --configuration-cache
+      working-directory: .github/workflow-samples/groovy-dsl
+    - name: Check no dependency graph is generated
+      shell: bash
+      run: |
+        if [ ! -z "$(ls -A dependency-graph-reports)" ]; then
+            echo "Expected no dependency graph files to be generated"
+            ls -l dependency-graph-reports
+            exit 1
+        fi        
+
+  dependency-graph-generate-submit-and-upload:
+    permissions:
+      contents: write
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle for dependency-graph generate
+      uses: ./setup-gradle
+      with:
+        dependency-graph: generate-submit-and-upload
+    - name: Run gradle build
+      id: gradle-build
+      run: ./gradlew build
+      working-directory: .github/workflow-samples/groovy-dsl
+
+  dependency-graph-generate-submit-and-upload-check:
+    needs: [dependency-graph-generate-submit-and-upload]
+    runs-on: "ubuntu-latest"
+    steps:
+    - name: Download dependency-graph artifact
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        path: downloaded-dependency-graphs
+        pattern: dependency-graph_*dependency-graph-generate-submit-and-upload.json
+    - name: Check for downloaded dependency graphs
+      shell: bash
+      run: |
+        ls -A "${{ github.workspace }}/downloaded-dependency-graphs"
+        if [ -z "$(ls -A "${{ github.workspace }}/downloaded-dependency-graphs")" ]; then
+          echo "No dependency graph files found"
+          exit 1
+        fi
