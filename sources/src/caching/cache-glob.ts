@@ -14,7 +14,8 @@ import path from 'path'
  *
  * This resolver instead consumes the pattern segment by segment: a literal segment is followed
  * directly with no directory listing at all, and only a wildcard segment costs a `readdir`. Nothing
- * outside the matched set is ever visited.
+ * outside the matched set is ever visited. Each `readdir` reports the type of every entry it returns,
+ * so classifying a match costs no further syscall unless it is a symbolic link.
  *
  * It deliberately implements only what these patterns use -- `*` within a single segment, and a
  * trailing slash meaning "directories only" -- and matches the options v5 passes to `@actions/glob`:
@@ -58,13 +59,28 @@ function exists(candidate: string): boolean {
     }
 }
 
-function readDirNames(dir: string): string[] {
+function readDirents(dir: string): fs.Dirent[] {
     try {
-        return fs.readdirSync(dir)
+        return fs.readdirSync(dir, {withFileTypes: true})
     } catch {
         // The directory may not exist for this Gradle version, or may have been removed mid-run.
         return []
     }
+}
+
+/**
+ * Whether a directory entry is a directory, following symbolic links.
+ *
+ * `readdir` already reports each entry's type, so the common case costs no syscall at all. A `Dirent`
+ * describes the link rather than its target, so only a symbolic link still needs a `stat`.
+ */
+function direntIsDirectory(entry: fs.Dirent, full: string): boolean {
+    return entry.isSymbolicLink() ? isDirectory(full) : entry.isDirectory()
+}
+
+/** Whether a directory entry resolves to anything: only a broken symbolic link does not. */
+function direntExists(entry: fs.Dirent, full: string): boolean {
+    return entry.isSymbolicLink() ? exists(full) : true
 }
 
 /**
@@ -125,18 +141,21 @@ export function resolvePatternLine(pattern: string): string[] {
         const matches = segmentMatcher(segment)
         const next: string[] = []
         for (const dir of current) {
-            for (const name of readDirNames(dir)) {
-                if (!matches(name)) {
+            // `dir` is already normalized and an entry name never contains a separator, so the child
+            // path is a concatenation; path.join would re-normalize both halves once per entry.
+            const prefix = dir.endsWith(path.sep) ? dir : dir + path.sep
+            for (const entry of readDirents(dir)) {
+                if (!matches(entry.name)) {
                     continue
                 }
-                const candidate = path.join(dir, name)
+                const candidate = prefix + entry.name
                 // Intermediate segments must be directories to descend into; only the final segment
                 // may match a file, and only when the pattern did not end in a slash.
                 if (isLastSegment) {
-                    if (directoriesOnly ? isDirectory(candidate) : exists(candidate)) {
+                    if (directoriesOnly ? direntIsDirectory(entry, candidate) : direntExists(entry, candidate)) {
                         next.push(candidate)
                     }
-                } else if (isDirectory(candidate)) {
+                } else if (direntIsDirectory(entry, candidate)) {
                     next.push(candidate)
                 }
             }

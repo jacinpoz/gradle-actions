@@ -151,6 +151,33 @@ describe('resolvePatternLine', () => {
         fs.symlinkSync(path.join(root, 'missing-target'), path.join(root, 'caches/jars-9/broken'), 'dir')
         expect(resolvePatternLine(path.join(root, 'caches/jars-*/*/'))).toEqual([])
     })
+
+    // A directory entry reports the link itself rather than its target, so every case below is one the
+    // entry type alone answers wrongly and only a stat on the link can settle.
+    it('omits a broken symlink when the pattern also matches files', () => {
+        mk('caches', 'jars-9')
+        touch('caches/jars-9/real-file')
+        fs.symlinkSync(path.join(root, 'missing-target'), path.join(root, 'caches/jars-9/broken'), 'file')
+        expect(resolvePatternLine(path.join(root, 'caches/jars-*/*'))).toEqual([path.join(root, 'caches/jars-9/real-file')])
+    })
+
+    it('excludes a symlink to a file from a directories-only pattern', () => {
+        mk('caches', 'jars-9')
+        const target = touch('real-file')
+        mk('caches', 'jars-9', 'dir')
+        fs.symlinkSync(target, path.join(root, 'caches/jars-9/link-to-file'), 'file')
+        expect(resolvePatternLine(path.join(root, 'caches/jars-*/*/'))).toEqual([path.join(root, 'caches/jars-9/dir')])
+    })
+
+    it('descends through a symlinked directory in an intermediate segment', () => {
+        const target = mk('real', 'transforms')
+        fs.mkdirSync(path.join(target, 'aaa'))
+        mk('caches')
+        fs.symlinkSync(path.join(root, 'real'), path.join(root, 'caches/9.6.1'), 'dir')
+        expect(resolvePatternLine(path.join(root, 'caches/*/transforms/*/'))).toEqual([
+            path.join(root, 'caches/9.6.1/transforms/aaa')
+        ])
+    })
 })
 
 describe('resolveEntryPattern', () => {
