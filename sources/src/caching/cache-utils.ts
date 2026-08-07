@@ -18,8 +18,21 @@ export function isCacheDebuggingEnabled(): boolean {
     return process.env['GRADLE_BUILD_ACTION_CACHE_DEBUG_ENABLED'] ? true : false
 }
 
+/**
+ * Rewrites path separators to '/', so that a cache key does not depend on the platform that wrote it.
+ *
+ * On POSIX the rewrite is a no-op and the names are returned untouched. v5 built a fresh RegExp per
+ * name to rewrite '/' to '/', which cost 78% of hashFileNames on a 177k-path Gradle User Home.
+ *
+ * `sep` is a parameter only so both platforms can be tested from either: `path.sep` is declared
+ * non-configurable, so a test cannot pretend to be running on the other one.
+ */
+export function normalizeFileNames(fileNames: string[], sep: string = path.sep): string[] {
+    return sep === '/' ? fileNames : fileNames.map(x => x.split(sep).join('/'))
+}
+
 export function hashFileNames(fileNames: string[]): string {
-    return hashStrings(fileNames.map(x => x.replace(new RegExp(`\\${path.sep}`, 'g'), '/')))
+    return hashStrings(normalizeFileNames(fileNames))
 }
 
 export function hashStrings(values: string[]): string {
