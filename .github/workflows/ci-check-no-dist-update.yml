@@ -1,6 +1,10 @@
 name: CI-check-no-dist-update
 
-# Prohibit any change to 'dist/**' on a non-release branch
+# Prohibit any change to 'dist/**' on a non-release branch.
+#
+# Upstream builds 'dist/' from a workflow, so a change to it in a pull request there is always a mistake.
+# This fork has to commit it by hand -- 'ci-update-dist.yml' is gated to the upstream repository and so does
+# not run here -- which would make this check fail on every release. It is gated the same way.
 on:
   workflow_dispatch:
   pull_request:
@@ -12,6 +16,7 @@ permissions:
 
 jobs:
   fail-on-dist-update:
+    if: github.repository == 'gradle/actions'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout sources
