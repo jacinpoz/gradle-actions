@@ -1,0 +1,17 @@
+diff --git a/node_modules/@actions/glob/lib/internal-globber.js b/node_modules/@actions/glob/lib/internal-globber.js
+index abff673..3b1ee77 100644
+--- a/node_modules/@actions/glob/lib/internal-globber.js
++++ b/node_modules/@actions/glob/lib/internal-globber.js
+@@ -136,7 +136,11 @@ export class DefaultGlobber {
+                     // Push the child items in reverse
+                     const childLevel = item.level + 1;
+                     const childItems = (yield __await(fs.promises.readdir(item.path))).map(x => new SearchState(path.join(item.path, x), childLevel));
+-                    stack.push(...childItems.reverse());
++                    // Pushed one at a time rather than spread: a spread passes one argument per
++                    // child, and a directory with ~100k entries overflows the call stack.
++                    for (let i = childItems.length - 1; i >= 0; i--) {
++                        stack.push(childItems[i]);
++                    }
+                 }
+                 // File
+                 else if (match & MatchKind.File) {

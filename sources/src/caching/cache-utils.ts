@@ -7,6 +7,12 @@ import * as path from 'path'
 import * as fs from 'fs'
 
 import {CacheEntryListener} from './cache-reporting'
+import {resolvePathsForCache} from './cache-glob'
+
+// '@actions/cache' resolves the paths it archives with '@actions/glob', which walks the whole tree
+// beneath a pattern's search root. Registering the resolver here means every save goes through the
+// targeted readdir path instead, and anything the resolver does not implement still falls back.
+cache.setPathResolver(resolvePathsForCache)
 
 const SEGMENT_DOWNLOAD_TIMEOUT_VAR = 'SEGMENT_DOWNLOAD_TIMEOUT_MINS'
 const SEGMENT_DOWNLOAD_TIMEOUT_DEFAULT = 10 * 60 * 1000 // 10 minutes

@@ -1,7 +1,13 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import {resolveEntryPattern, resolvePatternLine, splitPatternRoot} from '../../src/caching/cache-glob'
+import {
+    canResolvePatternLine,
+    resolveEntryPattern,
+    resolvePathsForCache,
+    resolvePatternLine,
+    splitPatternRoot
+} from '../../src/caching/cache-glob'
 
 let root: string
 
@@ -249,5 +255,62 @@ describe('splitPatternRoot', () => {
 
     it('reports no segments for a bare root', () => {
         expect(splitPatternRoot('/', path.posix)).toEqual({root: '/', segments: []})
+    })
+})
+
+// @actions/cache resolves the paths it archives itself. The action registers resolvePathsForCache to
+// do that resolution instead, so what it declines matters as much as what it handles: a pattern shape
+// it cannot express must fall back to @actions/glob rather than silently resolve to a subset, which
+// would quietly shrink what gets cached.
+describe('canResolvePatternLine', () => {
+    it.each([
+        ['a single wildcard segment', '/gradle/caches/*/transforms/*/'],
+        ['a suffix wildcard', '/gradle/caches/transforms-4/*4/'],
+        ['an extension wildcard', '/gradle/caches/*/generated-gradle-jars/*.jar'],
+        ['a fully literal path', '/gradle/caches']
+    ])('handles %s', (_name, pattern) => {
+        expect(canResolvePatternLine(pattern)).toBe(true)
+    })
+
+    it.each([
+        ['an exclusion', '!/gradle/caches/modules-2'],
+        ['a recursive wildcard', '/gradle/caches/**/transforms'],
+        ['a single-character wildcard', '/gradle/caches/jars-?'],
+        ['a character class', '/gradle/caches/jars-[0-9]'],
+        ['a brace expansion', '/gradle/caches/{modules-2,jars-9}'],
+        ['an extglob group', '/gradle/caches/+(modules-2|jars-9)']
+    ])('declines %s', (_name, pattern) => {
+        expect(canResolvePatternLine(pattern)).toBe(false)
+    })
+})
+
+describe('resolvePathsForCache', () => {
+    it('resolves patterns it fully implements', () => {
+        mk('caches', 'jars-9', 'aaa')
+        mk('caches', 'jars-9', 'bbb')
+        expect(resolvePathsForCache([path.join(root, 'caches/jars-*/*/')])?.sort()).toEqual([
+            path.join(root, 'caches/jars-9/aaa'),
+            path.join(root, 'caches/jars-9/bbb')
+        ])
+    })
+
+    it('declines the whole set when any one pattern is unsupported', () => {
+        mk('caches', 'jars-9', 'aaa')
+        expect(
+            resolvePathsForCache([path.join(root, 'caches/jars-*/*/'), `!${path.join(root, 'caches/jars-9')}`])
+        ).toBeUndefined()
+    })
+
+    it('declines an empty set rather than claiming it resolved to nothing', () => {
+        expect(resolvePathsForCache([])).toBeUndefined()
+        expect(resolvePathsForCache(['   '])).toBeUndefined()
+    })
+
+    it('resolves several patterns together, sorted and de-duplicated', () => {
+        mk('caches', 'jars-9', 'aaa')
+        mk('caches', 'modules-2', 'bbb')
+        expect(
+            resolvePathsForCache([path.join(root, 'caches/jars-*/*/'), path.join(root, 'caches/jars-9/*/')])
+        ).toEqual([path.join(root, 'caches/jars-9/aaa')])
     })
 })

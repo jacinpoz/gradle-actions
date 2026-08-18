@@ -204,3 +204,32 @@ export function resolveEntryPattern(pattern: string): string[] {
     }
     return [...all].sort()
 }
+
+/**
+ * Whether this resolver implements everything the given pattern uses.
+ *
+ * The cache entry patterns this action defines use only `*` within a single segment and a trailing
+ * slash. The Gradle User Home entry, though, is built from the `gradle-home-cache-includes` and
+ * `gradle-home-cache-excludes` inputs, so a user can supply `**`, an `!` exclusion, or any other
+ * shape `@actions/glob` accepts. Anything not listed here is left to `@actions/glob`.
+ */
+export function canResolvePatternLine(pattern: string): boolean {
+    return !pattern.startsWith('!') && !pattern.includes('**') && !/[?[\]{}()]/.test(pattern)
+}
+
+/**
+ * Resolves the paths for a set of patterns on behalf of `@actions/cache`, or returns undefined to
+ * leave them to `@actions/glob`.
+ *
+ * `@actions/cache` resolves the paths it archives itself, with `@actions/glob`, so saving a cache
+ * entry repeated the walk this resolver exists to avoid -- once per entry, and the action shards the
+ * largest entries into 16. Registered via `cache.setPathResolver`, which is added by the
+ * patch-package patch on that library.
+ */
+export function resolvePathsForCache(patterns: string[]): string[] | undefined {
+    const lines = patterns.map(line => line.trim()).filter(line => line.length > 0)
+    if (lines.length === 0 || !lines.every(canResolvePatternLine)) {
+        return undefined
+    }
+    return resolveEntryPattern(lines.join('\n'))
+}

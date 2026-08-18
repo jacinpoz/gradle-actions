@@ -1,5 +1,5 @@
 diff --git a/node_modules/@actions/cache/lib/cache.d.ts b/node_modules/@actions/cache/lib/cache.d.ts
-index b1ec143..9e7046d 100644
+index b1ec143..883a40f 100644
 --- a/node_modules/@actions/cache/lib/cache.d.ts
 +++ b/node_modules/@actions/cache/lib/cache.d.ts
 @@ -55,7 +55,7 @@ export declare function isFeatureAvailable(): boolean;
@@ -11,7 +11,7 @@ index b1ec143..9e7046d 100644
  /**
   * Saves a list of files with the specified key
   *
-@@ -65,4 +65,11 @@ export declare function restoreCache(paths: string[], primaryKey: string, restor
+@@ -65,4 +65,17 @@ export declare function restoreCache(paths: string[], primaryKey: string, restor
   * @param options cache upload options
   * @returns number returns cacheId if the cache was saved successfully and throws an error if save fails
   */
@@ -24,8 +24,14 @@ index b1ec143..9e7046d 100644
 +    size?: number;
 +    constructor(key: string, size?: number);
 +}
++
++// PATCHED: supply a resolver for the cache-entry pattern shapes the action uses, so @actions/glob
++// does not walk the whole search root. Return undefined to fall back to @actions/glob.
++export declare function setPathResolver(
++    resolver: ((patterns: string[]) => string[] | undefined) | undefined
++): void;
 diff --git a/node_modules/@actions/cache/lib/cache.js b/node_modules/@actions/cache/lib/cache.js
-index 63b338a..988ec2d 100644
+index 63b338a..601732b 100644
 --- a/node_modules/@actions/cache/lib/cache.js
 +++ b/node_modules/@actions/cache/lib/cache.js
 @@ -195,7 +195,7 @@ function restoreCacheV1(paths_1, primaryKey_1, restoreKeys_1, options_1) {
@@ -169,10 +175,12 @@ index 63b338a..988ec2d 100644
          }
          finally {
              // Try to delete the archive to save space
-@@ -600,4 +513,10 @@ function saveCacheV2(paths_1, key_1, options_1) {
+@@ -600,4 +513,12 @@ function saveCacheV2(paths_1, key_1, options_1) {
          return cacheId;
      });
  }
++// PATCHED - re-exported from internal/cacheUtils so the action can supply its own path resolver.
++export { setPathResolver } from './internal/cacheUtils.js';
 +export class CacheEntry {
 +    constructor(key, size) {
 +        this.key = key;
@@ -181,3 +189,105 @@ index 63b338a..988ec2d 100644
 +}
  //# sourceMappingURL=cache.js.map
 \ No newline at end of file
+diff --git a/node_modules/@actions/cache/lib/internal/cacheUtils.d.ts b/node_modules/@actions/cache/lib/internal/cacheUtils.d.ts
+index 3688ca1..6f11c48 100644
+--- a/node_modules/@actions/cache/lib/internal/cacheUtils.d.ts
++++ b/node_modules/@actions/cache/lib/internal/cacheUtils.d.ts
+@@ -3,6 +3,7 @@ import { CompressionMethod } from './constants.js';
+ export declare function createTempDirectory(): Promise<string>;
+ export declare function getArchiveFileSizeInBytes(filePath: string): number;
+ export declare function resolvePaths(patterns: string[]): Promise<string[]>;
++export declare function setPathResolver(resolver: ((patterns: string[]) => string[] | undefined) | undefined): void;
+ export declare function unlinkFile(filePath: fs.PathLike): Promise<void>;
+ export declare function getCompressionMethod(): Promise<CompressionMethod>;
+ export declare function getCacheFileName(compressionMethod: CompressionMethod): string;
+diff --git a/node_modules/@actions/cache/lib/internal/cacheUtils.js b/node_modules/@actions/cache/lib/internal/cacheUtils.js
+index 5ca63f5..0ee215b 100644
+--- a/node_modules/@actions/cache/lib/internal/cacheUtils.js
++++ b/node_modules/@actions/cache/lib/internal/cacheUtils.js
+@@ -54,12 +54,54 @@ export function createTempDirectory() {
+ export function getArchiveFileSizeInBytes(filePath) {
+     return fs.statSync(filePath).size;
+ }
++// PATCHED: allow the consumer to resolve the patterns itself.
++//
++// resolvePaths resolves with @actions/glob, which walks the whole tree beneath a pattern's search
++// root and filters. For a pattern anchored `caches/*` that root is the entire Gradle caches
++// directory, so resolving one transforms shard walks every dependency file under modules-2 as well:
++// 1305 ms per shard against 96 ms for a resolver that reads only the directories the pattern names,
++// and the action saves 16 of them.
++//
++// The consumer registers a resolver that returns absolute paths, or undefined for any pattern shape
++// it does not fully implement -- '**' and '!' exclusions among them -- in which case @actions/glob
++// still does the work.
++let externalPathResolver;
++export function setPathResolver(resolver) {
++    externalPathResolver = resolver;
++}
++function toWorkspaceRelative(files, workspace) {
++    const paths = [];
++    // Paths are made relative so the tar entries are all relative to the root of the workspace.
++    const needsSeparatorRewrite = path.sep !== '/';
++    const debugEnabled = core.isDebug();
++    for (const file of files) {
++        let relativeFile = path.relative(workspace, file);
++        if (needsSeparatorRewrite) {
++            // The original built a fresh RegExp per file to do this.
++            relativeFile = relativeFile.split(path.sep).join('/');
++        }
++        if (debugEnabled) {
++            // core.debug issues a workflow command whether or not debug logging is on, so at 177k
++            // matched paths this alone wrote 177k lines to stdout on every save.
++            core.debug(`Matched: ${relativeFile}`);
++        }
++        // path.relative returns empty string if workspace and file are equal
++        paths.push(relativeFile === '' ? '.' : relativeFile);
++    }
++    return paths;
++}
+ export function resolvePaths(patterns) {
+     return __awaiter(this, void 0, void 0, function* () {
+         var _a, e_1, _b, _c;
+         var _d;
+-        const paths = [];
+         const workspace = (_d = process.env['GITHUB_WORKSPACE']) !== null && _d !== void 0 ? _d : process.cwd();
++        if (externalPathResolver) {
++            const resolved = externalPathResolver(patterns);
++            if (resolved) {
++                return toWorkspaceRelative(resolved, workspace);
++            }
++        }
++        const files = [];
+         const globber = yield glob.create(patterns.join('\n'), {
+             implicitDescendants: false
+         });
+@@ -67,19 +109,7 @@ export function resolvePaths(patterns) {
+             for (var _e = true, _f = __asyncValues(globber.globGenerator()), _g; _g = yield _f.next(), _a = _g.done, !_a; _e = true) {
+                 _c = _g.value;
+                 _e = false;
+-                const file = _c;
+-                const relativeFile = path
+-                    .relative(workspace, file)
+-                    .replace(new RegExp(`\\${path.sep}`, 'g'), '/');
+-                core.debug(`Matched: ${relativeFile}`);
+-                // Paths are made relative so the tar entries are all relative to the root of the workspace.
+-                if (relativeFile === '') {
+-                    // path.relative returns empty string if workspace and file are equal
+-                    paths.push('.');
+-                }
+-                else {
+-                    paths.push(`${relativeFile}`);
+-                }
++                files.push(_c);
+             }
+         }
+         catch (e_1_1) { e_1 = { error: e_1_1 }; }
+@@ -89,7 +119,7 @@ export function resolvePaths(patterns) {
+             }
+             finally { if (e_1) throw e_1.error; }
+         }
+-        return paths;
++        return toWorkspaceRelative(files, workspace);
+     });
+ }
+ export function unlinkFile(filePath) {
