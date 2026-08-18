@@ -30,6 +30,8 @@ on:
         default: true
 
 env:
+  # The branch's committed 'dist' is what is measured, so there is no 'build-dist' step to download from.
+  SKIP_DIST: 'true'
   GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: caching-perf-${{ inputs.cache-key-prefix }}
   GRADLE_BUILD_ACTION_CACHE_KEY_JOB: caching-perf
   GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY: ${{ inputs.entry-concurrency }}
