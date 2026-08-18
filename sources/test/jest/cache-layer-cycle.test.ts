@@ -249,6 +249,32 @@ describe('an extracted entry over successive jobs', () => {
         expect(fs.existsSync(path.join(gradleUserHome, 'caches/transforms-4'))).toBe(false)
     })
 
+    // A cold cache knows nothing about how large a bundle is, so it splits a big one sixteen ways. Once a
+    // run has reported the sizes, the count is chosen from them -- here they are tiny, so the bundle
+    // becomes one entry. The run that changes the count saves those bundles in full once.
+    it('settles on a shard count once it knows how large the bundle is', async () => {
+        // The trailing character decides the shard, so these have to vary in it -- names that all end the
+        // same way would land in one shard however many there are.
+        const many = Array.from({length: 600}, (_, i) => i.toString(16).padStart(4, '0'))
+        addTransforms(many, {aged: true})
+
+        await extractor().extract(new CacheListener())
+        const shardedTypes = metadata().entries.filter(e => e.artifactType.startsWith('transforms-'))
+        expect(shardedTypes.length).toBeGreaterThan(1)
+        expect(shardedTypes.every(e => e.artifactType.startsWith('transforms-16-'))).toBe(true)
+
+        await extractor().restore(new CacheListener())
+        expect(transformsPresent()).toEqual([...many].sort())
+
+        ageAllTransforms()
+        await extractor().extract(new CacheListener())
+        const settled = metadata().entries.filter(e => e.artifactType.startsWith('transforms'))
+        expect(settled.map(e => e.artifactType)).toEqual(['transforms'])
+
+        await extractor().restore(new CacheListener())
+        expect(transformsPresent()).toEqual([...many].sort())
+    })
+
     it('saves the whole entry every time when layering is turned off', async () => {
         process.env['GRADLE_ACTIONS_CACHE_LAYERS'] = 'false'
         addTransforms(INITIAL, {aged: true})

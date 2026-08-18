@@ -65,20 +65,6 @@ const MAX_PRUNE_FRACTION = 0.1
  */
 const MODIFIED_SINCE_MARGIN_MS = 1000
 
-/**
- * Overrides how many shards a bundle is split into: 16 to the power of this, so 0 is one entry, 1 is
- * sixteen and 2 is two hundred and fifty-six.
- *
- * Sharding was introduced to limit how much one changed artifact invalidates. Layers now do that directly,
- * which raises the question of whether sixteen is still the right number: each shard costs its own
- * reservation, upload and finalization to save, and its own lookup to restore. This exists to answer that
- * with measurements rather than argument; it is not something a workflow should set.
- */
-function shardSuffixLengthOverride(): number | undefined {
-    const override = Number(process.env['GRADLE_ACTIONS_CACHE_SHARD_SUFFIX_LENGTH'])
-    return Number.isInteger(override) && override >= 0 && override <= 2 ? override : undefined
-}
-
 /** Whether incremental layers are enabled. Set the variable to 'false' to always save a full entry. */
 function layeringEnabled(): boolean {
     return process.env[LAYERS_VAR] !== 'false'
@@ -101,19 +87,30 @@ class ExtractedCacheEntry {
     layers: string[] | undefined
     /** How many paths this content held, so that a later run can tell whether the content was pruned. */
     pathCount: number | undefined
+    /** The bundle this entry is a shard of, if it is one. */
+    bundle: string | undefined
+    /**
+     * The archive size of the last full save of this entry, carried across saves that only added a layer.
+     * Summed over a bundle's shards, it is how the next run decides how many shards to use.
+     */
+    baseSizeBytes: number | undefined
 
     constructor(
         artifactType: string,
         pattern: string,
         cacheKey: string | undefined,
         layers?: string[],
-        pathCount?: number
+        pathCount?: number,
+        bundle?: string,
+        baseSizeBytes?: number
     ) {
         this.artifactType = artifactType
         this.pattern = pattern
         this.cacheKey = cacheKey
         this.layers = layers
         this.pathCount = pathCount
+        this.bundle = bundle
+        this.baseSizeBytes = baseSizeBytes
     }
 }
 
@@ -128,6 +125,22 @@ export function layersOf(entry: {cacheKey?: string; layers?: string[]}): string[
         return entry.layers
     }
     return entry.cacheKey ? [entry.cacheKey] : []
+}
+
+/**
+ * How large a bundle's archives came to, summed over the shards it was split into last time, or undefined
+ * when no run has reported a size for it.
+ */
+export function bundleSizeBytes(entries: ExtractedCacheEntry[], artifactType: string): number | undefined {
+    const sizes = entries
+        .filter(entry => entry.bundle === artifactType || entry.artifactType === artifactType)
+        .map(entry => entry.baseSizeBytes)
+    // A size missing from any shard would understate the whole, which would leave a bundle that needs
+    // splitting under-sharded. Better to fall back to the path count than to act on a partial total.
+    if (sizes.length === 0 || sizes.some(size => size === undefined)) {
+        return undefined
+    }
+    return sizes.reduce((total: number, size) => total + (size ?? 0), 0)
 }
 
 /** Names a layer in the caching report. The first layer keeps the entry's own name. */
@@ -160,7 +173,7 @@ export class ExtractedCacheEntryDefinition {
     pattern: string
     bundle: boolean
     uniqueFileNames = true
-    shardSuffixLength = 0
+    shardable = false
     notCacheableReason: string | undefined
 
     constructor(artifactType: string, pattern: string, bundle: boolean) {
@@ -170,38 +183,21 @@ export class ExtractedCacheEntryDefinition {
     }
 
     /**
-     * Split this bundle into 16^suffixLength separate cache entries, sharded on the trailing hex
-     * characters of the final path segment. See `shardPattern` for why the trailing characters are
-     * used rather than the leading ones.
+     * Allow this bundle to be split across several cache entries, on the trailing hex character of the
+     * final path segment. How many is decided per run by `shardCountFor`, from how large the bundle's
+     * archives came to last time: only enough to keep one entry from growing unwieldy.
      *
-     * Gradle names these directories after a content hash (an artifact sha1 under `modules-2`, a
-     * transform or accessors hash elsewhere), so the shard a directory belongs to is fixed by its
-     * own content and never moves when unrelated entries change. A single new or updated dependency
-     * therefore invalidates one shard rather than the whole bundle, and the shards restore
-     * concurrently instead of as one serial blob.
+     * Gradle names these directories after a content hash (an artifact sha1 under `modules-2`, a transform
+     * or accessors hash elsewhere), so the shard a directory belongs to is fixed by its own content and
+     * never moves when unrelated entries change. A single new or updated dependency therefore invalidates
+     * one shard rather than the whole bundle.
      *
-     * Any directory whose name does not end in a hex character matches no shard and is left in the
-     * main Gradle User Home entry, which is where it would have lived before this bundle was
-     * extracted at all.
+     * Any directory whose name does not end in a hex character matches no shard and is left in the main
+     * Gradle User Home entry, which is where it would have lived had this bundle never been extracted.
      */
-    withHexShards(suffixLength: number): ExtractedCacheEntryDefinition {
-        this.shardSuffixLength = shardSuffixLengthOverride() ?? suffixLength
+    withShards(): ExtractedCacheEntryDefinition {
+        this.shardable = true
         return this
-    }
-
-    /**
-     * Whether a bundle holding this many paths is worth splitting into shards.
-     *
-     * Every entry costs a reservation, an upload and a finalization -- three sequential round trips --
-     * plus its own `tar`, so sixteen shards of a small bundle are slower than one entry holding all of it,
-     * and the blast radius sharding exists to reduce is already small when there is little to invalidate.
-     * The threshold is expressed per shard so that it scales with the suffix length.
-     */
-    shouldShard(matchedPathCount: number): boolean {
-        if (this.shardSuffixLength === 0) {
-            return false
-        }
-        return matchedPathCount >= 16 ** this.shardSuffixLength * MIN_PATHS_PER_SHARD
     }
 
     /**
@@ -227,33 +223,82 @@ export class ExtractedCacheEntryDefinition {
 const HEX_DIGITS = '0123456789abcdef'
 
 /**
- * How many paths a shard should hold on average before sharding is worthwhile. See `shouldShard`.
+ * How many shards a bundle may be split into. Each has to be a whole number of hex suffixes, so that a
+ * path's shard follows from its name, which restricts the choice to the divisors of 16.
+ */
+const SHARD_COUNTS = [1, 2, 4, 8, 16]
+
+/**
+ * How large a shard's archive should be allowed to get.
+ *
+ * Sharding exists to bound this. It used to be fixed at 16 shards, which cost what it cost regardless of
+ * how much was in the bundle: measured against a local cache service at 50 ms round-trip latency, sixteen
+ * shards restored in 3176-4092 ms against 2199-2547 ms for one entry, because every shard is its own
+ * lookup and download. It buys nothing in bytes -- across six rounds the same content took 233 MB sharded
+ * and 224 MB not -- so the only reason to split a bundle is to keep any one entry from growing unwieldy.
+ */
+const MAX_SHARD_BYTES = 1024 * 1024 * 1024
+
+/**
+ * How many paths a shard should hold on average, when nothing is yet known about how large a bundle is.
  */
 const MIN_PATHS_PER_SHARD = 32
 
-/**
- * Enumerate the shard suffixes for a given suffix length: 16 single-character shards, 256 two-character
- * shards, and so on.
- */
-export function hexShardSuffixes(suffixLength: number): string[] {
-    let suffixes = ['']
-    for (let i = 0; i < suffixLength; i++) {
-        suffixes = suffixes.flatMap(suffix => HEX_DIGITS.split('').map(digit => `${suffix}${digit}`))
-    }
-    return suffixes
+/** Forces a shard count, for measuring the effect of one. Not something a workflow should set. */
+function shardCountOverride(): number | undefined {
+    const override = Number(process.env['GRADLE_ACTIONS_CACHE_SHARDS'])
+    return SHARD_COUNTS.includes(override) ? override : undefined
 }
 
 /**
- * Narrow a cache entry pattern to a single shard, by constraining the final path segment of each line
- * to names ending with the given suffix.
+ * How many shards to split a bundle into, given the size its archives came to last time and how many paths
+ * it matches now.
  *
- * Sharding is on the trailing characters of the hash rather than the leading ones because Gradle writes
- * the `modules-2` artifact directories using a numeric rendering of the sha1 that drops leading zeros:
- * roughly 6% of names are shorter than 40 characters, no name ever starts with '0', and the affected
- * hashes pile up on the remaining shards. Trailing characters are unaffected and measure out evenly
- * (1.09x max/mean over a real cache of 7,755 artifacts, against 2.32x by leading character).
+ * The size is what decides it: enough shards to keep each one under `MAX_SHARD_BYTES`, and no more. Until a
+ * run has reported a size there is nothing to go on, so the first run keeps what this action did before,
+ * which is to shard a bundle with enough paths in it and leave a small one whole.
+ */
+export function shardCountFor(bundleBytes: number | undefined, matchedPathCount: number): number {
+    const override = shardCountOverride()
+    if (override !== undefined) {
+        return override
+    }
+    if (bundleBytes === undefined) {
+        return matchedPathCount >= 16 * MIN_PATHS_PER_SHARD ? 16 : 1
+    }
+    return SHARD_COUNTS.find(count => bundleBytes / count <= MAX_SHARD_BYTES) ?? 16
+}
+
+/**
+ * The hex suffixes belonging to each shard, in order. Contiguous, so that a path's shard is its trailing
+ * character divided by the size of a shard.
+ */
+export function shardSuffixGroups(count: number): string[][] {
+    const size = HEX_DIGITS.length / count
+    return Array.from({length: count}, (_, index) => HEX_DIGITS.slice(index * size, (index + 1) * size).split(''))
+}
+
+/**
+ * Which shard a matched path belongs to, or undefined if it belongs to none.
  *
- * The pattern is rewritten rather than replaced by a resolved file list because `@actions/cache` derives
+ * Membership follows from the directory name alone, so it is stable across runs at a given shard count: a
+ * directory only moves when its content hash changes, which makes it a different directory. Trailing
+ * characters are used rather than leading ones because Gradle renders the `modules-2` sha1 numerically and
+ * drops leading zeros: roughly 6% of names are shorter than 40 characters, none starts with '0', and those
+ * hashes pile up on the remaining shards. Trailing characters measure out evenly -- 1.09x max/mean over a
+ * real cache of 7,755 artifacts, against 2.32x by leading character.
+ */
+export function shardIndexForPath(filePath: string, count: number): number | undefined {
+    const last = path.basename(filePath).toLowerCase().slice(-1)
+    const value = HEX_DIGITS.indexOf(last)
+    return value < 0 ? undefined : Math.floor(value / (HEX_DIGITS.length / count))
+}
+
+/**
+ * The pattern matching one shard: every line of the bundle's pattern, once per suffix the shard covers,
+ * with the last wildcard of the line constrained to names ending in it.
+ *
+ * The pattern is rewritten rather than replaced by the resolved file list because `@actions/cache` derives
  * its cache version from a hash of the paths it is given: the value passed when saving has to match the
  * value passed when restoring, and it is persisted to the cache metadata file in between. Patterns keep
  * that metadata small, which matters when a bundle covers tens of thousands of directories.
@@ -261,23 +306,16 @@ export function hexShardSuffixes(suffixLength: number): string[] {
  *   caches/modules-*\/files-*\/*\/*\/*\/*  ->  caches/modules-*\/files-*\/*\/*\/*\/*a
  *   caches/*\/transforms/*\/                ->  caches/*\/transforms/*a/
  */
-export function shardPattern(pattern: string, suffix: string): string {
+export function shardPatternForSuffixes(pattern: string, suffixes: string[]): string {
     return pattern
         .split('\n')
-        .map(line => line.replace(/\*(?=[^*]*$)/, `*${suffix}`))
+        .flatMap(line => suffixes.map(suffix => line.replace(/\*(?=[^*]*$)/, `*${suffix}`)))
         .join('\n')
 }
 
-/**
- * Determine which shard a matched path belongs to, or undefined if it belongs to none.
- *
- * Shard membership follows from the directory name alone, so it is stable across runs: a directory only
- * changes shard if its content hash changes, which means it is a different directory.
- */
-export function shardSuffixForPath(filePath: string, suffixLength: number): string | undefined {
-    const name = path.basename(filePath).toLowerCase()
-    const suffix = name.substring(name.length - suffixLength)
-    return suffix.length === suffixLength && [...suffix].every(c => HEX_DIGITS.includes(c)) ? suffix : undefined
+/** Names the shard entry for a bundle, so that a change of shard count is a change of identity. */
+export function shardArtifactType(artifactType: string, count: number, index: number): string {
+    return `${artifactType}-${count}-${index}`
 }
 
 /** Restores or saves one cache entry. Deferred so that the fan-out can be bounded. */
@@ -293,6 +331,8 @@ export interface RestoredEntries {
 interface EntrySaveRequest {
     matchingFiles: string[]
     artifactType: string
+    /** The bundle this entry is a shard of, if it is one. */
+    bundle?: string
     pattern: string
     /** Whether the matched file names identify the content, so that the key can be hashed from them. */
     uniqueFileNames: boolean
@@ -459,7 +499,15 @@ abstract class AbstractEntryExtractor {
             }
         }
 
-        return new ExtractedCacheEntry(artifactType, pattern, cacheEntry.cacheKey, layers, cacheEntry.pathCount)
+        return new ExtractedCacheEntry(
+            artifactType,
+            pattern,
+            cacheEntry.cacheKey,
+            layers,
+            cacheEntry.pathCount,
+            cacheEntry.bundle,
+            cacheEntry.baseSizeBytes
+        )
     }
 
     /**
@@ -499,39 +547,42 @@ abstract class AbstractEntryExtractor {
                 continue
             }
 
-            if (cacheEntryDefinition.bundle && cacheEntryDefinition.shouldShard(matchingFiles.length)) {
-                // For a sharded bundle, group the matched paths by the leading hex characters of their
-                // directory name and save one entry per non-empty shard. The paths are partitioned here,
-                // from the single glob already performed above, rather than by globbing once per shard.
-                const suffixLength = cacheEntryDefinition.shardSuffixLength
-                const shards = new Map<string, string[]>()
+            const shardCount = cacheEntryDefinition.shardable
+                ? shardCountFor(bundleSizeBytes(previouslyRestoredEntries, artifactType), matchingFiles.length)
+                : 1
+
+            if (cacheEntryDefinition.bundle && shardCount > 1) {
+                // Partitioned here, from the single resolve already performed above, rather than by
+                // resolving once per shard.
+                const groups = shardSuffixGroups(shardCount)
+                const shards = new Map<number, string[]>()
                 let unsharded = 0
 
                 for (const matchingFile of matchingFiles) {
-                    const suffix = shardSuffixForPath(matchingFile, suffixLength)
-                    if (suffix === undefined) {
+                    const index = shardIndexForPath(matchingFile, shardCount)
+                    if (index === undefined) {
                         unsharded++
                         continue
                     }
-                    const shard = shards.get(suffix)
+                    const shard = shards.get(index)
                     if (shard) {
                         shard.push(matchingFile)
                     } else {
-                        shards.set(suffix, [matchingFile])
+                        shards.set(index, [matchingFile])
                     }
                 }
 
                 if (unsharded > 0) {
                     // Left in the main Gradle User Home entry rather than dropped.
                     cacheDebug(
-                        `${unsharded} of ${matchingFiles.length} ${artifactType} paths are do not end in hex and match no shard`
+                        `${unsharded} of ${matchingFiles.length} ${artifactType} paths do not end in hex and match no shard`
                     )
                 }
 
-                cacheDebug(`Sharding ${artifactType} into ${shards.size} entries from ${matchingFiles.length} paths`)
+                cacheDebug(`Sharding ${artifactType} into ${shards.size} of ${shardCount} entries`)
 
-                for (const suffix of hexShardSuffixes(suffixLength)) {
-                    const shardFiles = shards.get(suffix)
+                for (const [index, group] of groups.entries()) {
+                    const shardFiles = shards.get(index)
                     if (!shardFiles) {
                         continue
                     }
@@ -539,8 +590,9 @@ abstract class AbstractEntryExtractor {
                         this.saveExtractedCacheEntry(
                             {
                                 matchingFiles: shardFiles,
-                                artifactType: `${artifactType}-${suffix}`,
-                                pattern: shardPattern(pattern, suffix),
+                                artifactType: shardArtifactType(artifactType, shardCount, index),
+                                bundle: artifactType,
+                                pattern: shardPatternForSuffixes(pattern, group),
                                 uniqueFileNames: cacheEntryDefinition.uniqueFileNames,
                                 layerable: cacheEntryDefinition.uniqueFileNames
                             },
@@ -597,7 +649,7 @@ abstract class AbstractEntryExtractor {
         restoredAt: number | undefined,
         listener: CacheListener
     ): Promise<ExtractedCacheEntry> {
-        const {matchingFiles, artifactType, pattern, uniqueFileNames} = request
+        const {matchingFiles, artifactType, bundle, pattern, uniqueFileNames} = request
         const entryListener = listener.entry(pattern)
 
         const keyStartTime = Date.now()
@@ -610,6 +662,9 @@ abstract class AbstractEntryExtractor {
         const previousLayers = previous ? layersOf(previous) : []
 
         let layers: string[]
+        // Only a full save measures the whole entry; a layer saves a fraction of it, so the size recorded
+        // for the base is carried forward until the next one replaces it.
+        let baseSizeBytes = previous?.baseSizeBytes
         if (previous?.cacheKey === cacheKey) {
             cacheDebug(`No change to previously restored ${artifactType}. Not saving.`)
             entryListener.markNotSaved('contents unchanged')
@@ -630,7 +685,7 @@ abstract class AbstractEntryExtractor {
                 await this.saveEntry(pattern, delta, layerKey, layerListener)
                 layers = [...previousLayers, layerKey]
             } else {
-                await this.saveEntry(pattern, matchingFiles, cacheKey, entryListener)
+                baseSizeBytes = await this.saveEntry(pattern, matchingFiles, cacheKey, entryListener)
                 layers = [cacheKey]
             }
         }
@@ -642,7 +697,15 @@ abstract class AbstractEntryExtractor {
         await deleteAll(matchingFiles)
         entryListener.markDeleteTime(Date.now() - deleteStartTime)
 
-        return new ExtractedCacheEntry(artifactType, pattern, cacheKey, layers, matchingFiles.length)
+        return new ExtractedCacheEntry(
+            artifactType,
+            pattern,
+            cacheKey,
+            layers,
+            matchingFiles.length,
+            bundle,
+            baseSizeBytes
+        )
     }
 
     /**
@@ -658,9 +721,9 @@ abstract class AbstractEntryExtractor {
         files: string[],
         cacheKey: string,
         entryListener: CacheEntryListener
-    ): Promise<void> {
+    ): Promise<number | undefined> {
         const cachePaths = pattern.split('\n')
-        await withExplicitPaths(cachePaths, files, async () => saveCache(cachePaths, cacheKey, entryListener))
+        return withExplicitPaths(cachePaths, files, async () => saveCache(cachePaths, cacheKey, entryListener))
     }
 
     /**
@@ -861,21 +924,21 @@ export class GradleHomeEntryExtractor extends AbstractEntryExtractor {
             // Sharded: these bundles are large and their directory names are content hashes, so a single
             // changed artifact need only invalidate one shard. Left unsharded are 'instrumented-jars'
             // (small, and names are prefixed 'o_' rather than hex) and 'groovy-dsl' (small).
-            entryDefinition('dependencies', ['caches/modules-*/files-*/*/*/*/*'], true).withHexShards(1),
+            entryDefinition('dependencies', ['caches/modules-*/files-*/*/*/*/*'], true).withShards(),
             entryDefinition('instrumented-jars', ['caches/jars-*/*/'], true),
             entryDefinition(
                 'kotlin-dsl',
                 ['caches/*/kotlin-dsl/accessors/*/', 'caches/*/kotlin-dsl/scripts/*/'],
                 true
-            ).withHexShards(1),
+            ).withShards(),
             entryDefinition('groovy-dsl', ['caches/*/groovy-dsl/*/'], true),
-            entryDefinition('transforms', ['caches/transforms-4/*/', 'caches/*/transforms/*/'], true).withHexShards(1),
+            entryDefinition('transforms', ['caches/transforms-4/*/', 'caches/*/transforms/*/'], true).withShards(),
             // The local build cache. Extracted for the same reason as the bundles above: it is named by
             // content hash, it grows on every build, and left in place it rides along inside the main
             // Gradle User Home entry, which is keyed on the git SHA and so is re-uploaded in full on every
             // run. 'gc.properties' and 'build-cache-1.lock' end in no hex character, so they match no shard
             // and stay where they are -- which is what is wanted for a lock file.
-            entryDefinition('build-cache', ['caches/build-cache-1/*'], true).withHexShards(1)
+            entryDefinition('build-cache', ['caches/build-cache-1/*'], true).withShards()
         ]
     }
 }

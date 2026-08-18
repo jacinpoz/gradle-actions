@@ -1,169 +1,160 @@
+import {describe, expect, it} from '@jest/globals'
+
 import {
-    ExtractedCacheEntryDefinition,
-    hexShardSuffixes,
-    shardPattern,
-    shardSuffixForPath
+    bundleSizeBytes,
+    shardArtifactType,
+    shardCountFor,
+    shardIndexForPath,
+    shardPatternForSuffixes,
+    shardSuffixGroups
 } from '../../src/caching/gradle-home-extry-extractor'
 
-describe('hexShardSuffixes', () => {
-    it('enumerates 16 shards for a single character', () => {
-        expect(hexShardSuffixes(1)).toEqual([
-            '0',
-            '1',
-            '2',
-            '3',
-            '4',
-            '5',
-            '6',
-            '7',
-            '8',
-            '9',
-            'a',
-            'b',
-            'c',
-            'd',
-            'e',
-            'f'
-        ])
+const GIB = 1024 * 1024 * 1024
+
+describe('shardCountFor', () => {
+    // The size is what sharding exists to bound. Splitting a bundle costs a lookup and a download per
+    // shard on every restore and three round trips per shard on every save, so the answer is as few as
+    // keep one entry from growing unwieldy.
+    describe('decides from the size the bundle reached last time', () => {
+        it('leaving a bundle whole while it fits in one entry', () => {
+            expect(shardCountFor(0, 100000)).toBe(1)
+            expect(shardCountFor(GIB, 100000)).toBe(1)
+        })
+        it('splitting it just enough as it grows', () => {
+            expect(shardCountFor(1.5 * GIB, 100000)).toBe(2)
+            expect(shardCountFor(3 * GIB, 100000)).toBe(4)
+            expect(shardCountFor(7 * GIB, 100000)).toBe(8)
+            expect(shardCountFor(12 * GIB, 100000)).toBe(16)
+        })
+        it('stopping at sixteen, however large it gets', () => {
+            expect(shardCountFor(50 * GIB, 100000)).toBe(16)
+            expect(shardCountFor(500 * GIB, 100000)).toBe(16)
+        })
+        it('ignoring the path count once a size is known', () => {
+            expect(shardCountFor(4 * GIB, 1)).toBe(4)
+        })
     })
 
-    it('enumerates 256 shards for two characters', () => {
-        const prefixes = hexShardSuffixes(2)
-        expect(prefixes.length).toBe(256)
-        expect(prefixes[0]).toBe('00')
-        expect(prefixes[255]).toBe('ff')
-        expect(new Set(prefixes).size).toBe(256)
-    })
-
-    it('is a no-op for zero length', () => {
-        expect(hexShardSuffixes(0)).toEqual([''])
-    })
-})
-
-describe('shardPattern', () => {
-    it('constrains the final segment of a dependencies pattern', () => {
-        expect(shardPattern('caches/modules-*/files-*/*/*/*/*', 'a')).toBe('caches/modules-*/files-*/*/*/*/*a')
-    })
-
-    it('constrains the final segment when the pattern ends with a directory separator', () => {
-        expect(shardPattern('caches/*/transforms/*/', '3')).toBe('caches/*/transforms/*3/')
-    })
-
-    it('constrains every line of a multi-line pattern', () => {
-        expect(shardPattern('caches/transforms-4/*/\ncaches/*/transforms/*/', 'f')).toBe(
-            'caches/transforms-4/*f/\ncaches/*/transforms/*f/'
-        )
-    })
-
-    it('leaves earlier wildcards untouched', () => {
-        // Only the last '*' is narrowed; the intervening group/module/version wildcards must survive.
-        const sharded = shardPattern('caches/modules-*/files-*/*/*/*/*', '0')
-        expect(sharded.split('*').length - 1).toBe(6)
-    })
-
-    it('produces distinct patterns for every shard', () => {
-        const patterns = hexShardSuffixes(1).map(p => shardPattern('caches/*/transforms/*/', p))
-        expect(new Set(patterns).size).toBe(16)
+    // A bundle's size is only known once a run has saved it. Until then this keeps what the action did
+    // before sizes were recorded, so a first run behaves as it always has.
+    describe('falls back to the path count when no size is known', () => {
+        it('sharding a bundle with enough paths in it', () => {
+            expect(shardCountFor(undefined, 512)).toBe(16)
+            expect(shardCountFor(undefined, 185685)).toBe(16)
+        })
+        it('leaving a small one whole', () => {
+            expect(shardCountFor(undefined, 511)).toBe(1)
+            expect(shardCountFor(undefined, 0)).toBe(1)
+        })
     })
 })
 
-describe('shardSuffixForPath', () => {
-    it('shards an artifact sha1 directory on its last character', () => {
-        expect(
-            shardSuffixForPath(
-                '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-gradle-plugin-api/2.1.21/f176c87b4bb3131b908dc4cdb5460082c06121c0',
-                1
-            )
-        ).toBe('0')
-    })
-
-    it('shards a transform hash directory', () => {
-        expect(
-            shardSuffixForPath('/home/runner/.gradle/caches/9.6.1/transforms/000015e2ad22c846b87c2c4a53e11951', 1)
-        ).toBe('1')
-    })
-
-    it('supports multi-character prefixes', () => {
-        expect(shardSuffixForPath('/x/000015e2ad22c846b87c2c4a53e11951', 2)).toBe('51')
-    })
-
-    it('returns undefined for names that are not hex, so they stay in the main entry', () => {
-        // Instrumented jars are named 'o_<hash>' in some Gradle versions.
-        expect(shardSuffixForPath('/home/runner/.gradle/caches/jars-9/some_name_ending_in_z', 1)).toBeUndefined()
-    })
-
-    it('is case insensitive', () => {
-        expect(shardSuffixForPath('/x/0123ABCDEF', 1)).toBe('f')
-    })
-
-    it('assigns every hex-named path to exactly one shard', () => {
-        const names = ['abc0', 'abc9', 'abca', 'abcf', 'def5']
-        const assigned = names.map(n => shardSuffixForPath(`/x/${n}`, 1))
-        expect(assigned).toEqual(['0', '9', 'a', 'f', '5'])
-    })
-
-    it('distributes evenly over sha1 names whose leading zeros Gradle has stripped', () => {
-        // Gradle renders the modules-2 artifact sha1 numerically, dropping leading zeros, so names are
-        // sometimes shorter than 40 characters and never begin with '0'. Measured on a real cache:
-        // 433/7755 names were 39 chars, 29 were 38, 1 was 37. Sharding on the leading character would
-        // leave shard '0' permanently empty and overload the rest; the trailing character is unaffected.
-        const stripped = ['f6fd05a8e7a74fbba7b88b06c1e6d300e5e8fde', '8e7cc9ec98823ea809a5102bfa565f8e9e24910']
-        for (const name of stripped) {
-            expect(name.length).toBeLessThan(40)
-            expect(name.startsWith('0')).toBe(false)
-            // Still shards cleanly, because the suffix is untouched by the stripping.
-            expect(shardSuffixForPath(`/x/${name}`, 1)).toBe(name.slice(-1))
+describe('shardSuffixGroups', () => {
+    it('gives every shard the same number of suffixes', () => {
+        for (const count of [1, 2, 4, 8, 16]) {
+            const groups = shardSuffixGroups(count)
+            expect(groups).toHaveLength(count)
+            expect(new Set(groups.map(group => group.length))).toEqual(new Set([16 / count]))
+            expect(groups.flat().join('')).toBe('0123456789abcdef')
         }
     })
-
-    it('is stable: membership depends only on the directory name', () => {
-        // The same hash under a different group/module/version must land in the same shard.
-        const a = shardSuffixForPath('/x/caches/modules-2/files-2.1/g1/m1/1.0/deadbeef', 1)
-        const b = shardSuffixForPath('/x/caches/modules-2/files-2.1/g2/m2/9.9/deadbeef', 1)
-        expect(a).toBe(b)
+    it("groups contiguously, so a path's shard is its trailing character divided by the shard size", () => {
+        expect(shardSuffixGroups(4)).toEqual([
+            ['0', '1', '2', '3'],
+            ['4', '5', '6', '7'],
+            ['8', '9', 'a', 'b'],
+            ['c', 'd', 'e', 'f']
+        ])
     })
 })
 
-describe('shouldShard', () => {
-    const bundle = (suffixLength: number): ExtractedCacheEntryDefinition =>
-        new ExtractedCacheEntryDefinition('transforms', '/gradle/caches/transforms-4/*/', true).withHexShards(
-            suffixLength
+describe('shardIndexForPath', () => {
+    it('places a path by the trailing character of its name', () => {
+        expect(shardIndexForPath('/gradle/caches/transforms-4/abc0', 4)).toBe(0)
+        expect(shardIndexForPath('/gradle/caches/transforms-4/abc3', 4)).toBe(0)
+        expect(shardIndexForPath('/gradle/caches/transforms-4/abc4', 4)).toBe(1)
+        expect(shardIndexForPath('/gradle/caches/transforms-4/abcf', 4)).toBe(3)
+    })
+    it('is case insensitive, as hex is', () => {
+        expect(shardIndexForPath('/gradle/caches/jars-9/ABCF', 4)).toBe(3)
+    })
+    it('places everything in the one shard when there is only one', () => {
+        for (const name of ['abc0', 'abcf', 'abc8']) {
+            expect(shardIndexForPath(`/gradle/caches/transforms-4/${name}`, 1)).toBe(0)
+        }
+    })
+    // These stay in the main Gradle User Home entry, which is where they lived before the bundle was
+    // extracted at all. 'caches/build-cache-1/*' matches two such files.
+    it('places a name that does not end in hex in no shard', () => {
+        expect(shardIndexForPath('/gradle/caches/build-cache-1/gc.properties', 16)).toBeUndefined()
+        expect(shardIndexForPath('/gradle/caches/build-cache-1/build-cache-1.lock', 16)).toBeUndefined()
+        expect(shardIndexForPath('/gradle/caches/9.6.1/kotlin-dsl/scripts/cache.properties', 16)).toBeUndefined()
+    })
+    it('shards the content-addressed entries of the local build cache', () => {
+        expect(shardIndexForPath('/gradle/caches/build-cache-1/006cbc5b15b9804a96d4de94d6e1acc3', 16)).toBe(3)
+        expect(shardIndexForPath('/gradle/caches/build-cache-1/fee1e974fb8e7da2610ddf6afb3385b0', 16)).toBe(0)
+    })
+})
+
+describe('shardPatternForSuffixes', () => {
+    // The pattern is what the cache version is derived from, so it has to say exactly which names the
+    // entry holds: one line per suffix the shard covers, per line of the bundle's pattern.
+    it("constrains the last wildcard of a line to each of the shard's suffixes", () => {
+        expect(shardPatternForSuffixes('/gradle/caches/transforms-4/*/', ['0', '1'])).toBe(
+            '/gradle/caches/transforms-4/*0/\n/gradle/caches/transforms-4/*1/'
         )
-
-    it('never shards a bundle that was not annotated for it', () => {
-        const unsharded = new ExtractedCacheEntryDefinition('groovy-dsl', '/gradle/caches/*/groovy-dsl/*/', true)
-        expect(unsharded.shouldShard(100000)).toBe(false)
     })
-
-    // Sixteen entries each holding a handful of paths cost sixteen reservations, uploads and finalizations
-    // to save what one entry would, and there is little blast radius left to reduce.
-    it('leaves a small bundle whole', () => {
-        expect(bundle(1).shouldShard(0)).toBe(false)
-        expect(bundle(1).shouldShard(511)).toBe(false)
+    it('covers every line of a multi-line pattern', () => {
+        const pattern = '/gradle/caches/transforms-4/*/\n/gradle/caches/*/transforms/*/'
+        expect(shardPatternForSuffixes(pattern, ['a', 'b']).split('\n')).toEqual([
+            '/gradle/caches/transforms-4/*a/',
+            '/gradle/caches/transforms-4/*b/',
+            '/gradle/caches/*/transforms/*a/',
+            '/gradle/caches/*/transforms/*b/'
+        ])
     })
-
-    it('shards a bundle big enough for every shard to be worth an entry', () => {
-        expect(bundle(1).shouldShard(512)).toBe(true)
-        expect(bundle(1).shouldShard(185685)).toBe(true)
-    })
-
-    it('scales the threshold with the number of shards', () => {
-        expect(bundle(2).shouldShard(512)).toBe(false)
-        expect(bundle(2).shouldShard(8192)).toBe(true)
+    it('leaves earlier wildcards alone', () => {
+        expect(shardPatternForSuffixes('/gradle/caches/modules-*/files-*/*/*/*/*', ['f'])).toBe(
+            '/gradle/caches/modules-*/files-*/*/*/*/*f'
+        )
     })
 })
 
-describe('the local build cache', () => {
-    // 'caches/build-cache-1/*' matches the cache entries, which are named by content hash, alongside two
-    // files that must stay in the Gradle User Home. Only paths ending in a hex character belong to a shard,
-    // so those two are left where they are -- which is what is wanted for a lock file in particular.
-    it('shards its content-addressed entries', () => {
-        expect(shardSuffixForPath('/gradle/caches/build-cache-1/006cbc5b15b9804a96d4de94d6e1acc3', 1)).toBe('3')
-        expect(shardSuffixForPath('/gradle/caches/build-cache-1/fee1e974fb8e7da2610ddf6afb3385b0', 1)).toBe('0')
+describe('shardArtifactType', () => {
+    // The shard count is part of the name, so changing it changes the entry's identity: a shard of four is
+    // not the same content as a shard of sixteen, and must not be restored as though it were.
+    it('names a shard by its count and index', () => {
+        expect(shardArtifactType('transforms', 4, 2)).toBe('transforms-4-2')
+        expect(shardArtifactType('transforms', 16, 2)).toBe('transforms-16-2')
+    })
+})
+
+describe('bundleSizeBytes', () => {
+    const entry = (artifactType: string, bundle: string | undefined, baseSizeBytes: number | undefined): never =>
+        ({artifactType, bundle, baseSizeBytes}) as never
+
+    it('sums the shards of a bundle', () => {
+        const entries = [
+            entry('transforms-4-0', 'transforms', 100),
+            entry('transforms-4-1', 'transforms', 200),
+            entry('dependencies-16-0', 'dependencies', 900)
+        ]
+        expect(bundleSizeBytes(entries, 'transforms')).toBe(300)
+        expect(bundleSizeBytes(entries, 'dependencies')).toBe(900)
     })
 
-    it('leaves its bookkeeping files out of every shard', () => {
-        expect(shardSuffixForPath('/gradle/caches/build-cache-1/gc.properties', 1)).toBeUndefined()
-        expect(shardSuffixForPath('/gradle/caches/build-cache-1/build-cache-1.lock', 1)).toBeUndefined()
+    it("uses an unsharded bundle's own entry", () => {
+        expect(bundleSizeBytes([entry('transforms', undefined, 500)], 'transforms')).toBe(500)
+    })
+
+    it('is unknown when the bundle has never been saved', () => {
+        expect(bundleSizeBytes([], 'transforms')).toBeUndefined()
+    })
+
+    // A size missing from any shard would understate the whole, which would under-shard a bundle that
+    // needs splitting. Better to fall back to the path count than to act on a partial total.
+    it('is unknown when any shard has no recorded size', () => {
+        const entries = [entry('transforms-4-0', 'transforms', 100), entry('transforms-4-1', 'transforms', undefined)]
+        expect(bundleSizeBytes(entries, 'transforms')).toBeUndefined()
     })
 })

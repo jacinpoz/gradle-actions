@@ -330,7 +330,13 @@ gradle-home-cache-excludes: |
 
 #### Sharded and incremental entries
 
-The largest of these -- dependencies, artifact transforms, compiled build scripts and the local build cache -- are named by content hash, so each one always belongs to the same shard no matter what else changes around it. Those entries are split across 16 cache entries on the last character of that hash, once there is enough content for it to be worth doing. A single new dependency then invalidates one shard instead of the whole set, and the shards transfer at the same time as each other.
+The largest of these -- dependencies, artifact transforms, compiled build scripts and the local build cache -- are named by content hash, so each one always belongs to the same shard no matter what else changes around it. Those entries may be split across several cache entries on the last character of that hash.
+
+How many is decided from how large the entry's archives came to on the previous run, and is only as many as keeps one entry from growing unwieldy: a bundle that fits comfortably in a single entry is left as one. This matters because every shard is a separate lookup and download when restoring, and a separate reservation, upload and finalization when saving. Sharding does not reduce how much is written -- incremental saves do that -- so the only reason to split a bundle is its size.
+
+Nothing is known about a bundle's size until a run has saved it, so the first run after a cold cache splits a large bundle 16 ways and then settles on the right number from the second run onwards. Changing the number changes what each entry holds, so the run that changes it saves those bundles in full once.
+
+Set `GRADLE_ACTIONS_CACHE_SHARDS` to `1`, `2`, `4`, `8` or `16` to fix the number instead of letting it be chosen.
 
 Each of those entries is also saved incrementally. When the content of an entry has grown since it was restored, only what the build added is saved, as a further cache entry layered on top of the one that was restored. A job that pulls in one new dependency therefore uploads that dependency, rather than a sixteenth of every dependency it has. A chain is collapsed back into a single entry once it is four layers long, or when the content it restored has been substantially pruned by [cache cleanup](#configuring-cache-cleanup), which a layer cannot express.
 

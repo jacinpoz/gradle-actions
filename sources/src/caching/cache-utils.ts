@@ -124,13 +124,24 @@ export async function restoreCache(
     }
 }
 
-export async function saveCache(cachePath: string[], cacheKey: string, listener: CacheEntryListener): Promise<void> {
+/**
+ * Saves a cache entry, reporting the size of the archive that was stored.
+ *
+ * The size is what tells a later run how large this entry has become, and so how many shards its bundle
+ * should be split across. It is undefined when the entry could not be saved, or already existed.
+ */
+export async function saveCache(
+    cachePath: string[],
+    cacheKey: string,
+    listener: CacheEntryListener
+): Promise<number | undefined> {
     try {
         const startTime = Date.now()
         const savedEntry = await cache.saveCache(cachePath, cacheKey)
         const saveTime = Date.now() - startTime
         listener.markSaved(savedEntry.key, savedEntry.size, saveTime)
         core.info(`Saved cache entry with key ${cacheKey} from ${cachePath.join()} in ${saveTime}ms`)
+        return savedEntry.size
     } catch (error) {
         if (error instanceof cache.CacheWriteDeniedError) {
             // The cache token issued for this run is read-only, which the service does for an untrusted
@@ -144,6 +155,7 @@ export async function saveCache(cachePath: string[], cacheKey: string, listener:
         }
         handleCacheFailure(error, `Failed to save cache entry with path '${cachePath}' and key: ${cacheKey}`)
     }
+    return undefined
 }
 
 export function cacheDebug(message: string): void {

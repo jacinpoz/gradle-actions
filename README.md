@@ -38,8 +38,8 @@ from the action alone; it is fixed by a patch.
 **Caching performance.** Cache entry patterns are resolved by reading only the directories a pattern can
 match, rather than walking the tree beneath its search root and filtering, and the matched paths are then
 handed to `@actions/cache` so that the work is not repeated when the archive is built. Large bundle entries
-are sharded 16 ways on the trailing character of Gradle's content hash, so one changed artifact
-invalidates one shard rather than the whole bundle, and shards transfer concurrently.
+are sharded on the trailing character of Gradle's content hash, across as many entries as it takes to keep
+one from growing unwieldy and no more, because every shard costs a lookup and a download to restore.
 
 **Cache entries are saved incrementally.** Upstream re-saves a whole entry whenever any of its content
 changes, so a job that resolves one new dependency re-uploads a sixteenth of every dependency it has. Here
@@ -75,6 +75,7 @@ was replaced by a pattern match for the one directory-index scrape that used it.
 | Uploaded by a job that added a little | 198 MB | 5 MB |
 | Time to save it | 2206 ms | 580 ms |
 | Saving 66 entries | 3051 ms | 2693 ms |
+| Restoring a Gradle User Home, at 50 ms latency | 3924 ms | 2593 ms |
 | Extracted-entry caching on Windows | broken | working |
 
 The first four rows are measured against a Gradle User Home with ~178k transform directories. A small cache

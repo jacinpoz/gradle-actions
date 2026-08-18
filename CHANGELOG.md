@@ -3,6 +3,58 @@
 This is an unofficial derivative of [gradle/actions](https://github.com/gradle/actions). See
 [NOTICE](NOTICE) for attribution and [README](README.md) for why the fork exists.
 
+## v1.2.0
+
+Sharding is now decided by size rather than fixed at sixteen. That is worth doing because v1.1.0's
+incremental saves took over the job sharding was introduced for.
+
+### Bundles are split only as far as their size requires
+
+A large cache entry used to be split across 16 entries unconditionally. Every shard is a separate lookup and
+download when restoring and three round trips when saving, so that cost was paid whether or not the bundle
+was large enough to need it.
+
+The number is now chosen from how large the bundle's archives came to on the previous run: as few as keeps
+one entry under a gigabyte, and no more. Most Gradle User Homes will find their bundles fit in one entry
+each.
+
+Measured against a local stand-in for the GitHub Actions cache service, with a shared 100 MB/s limit and
+50 ms of round-trip latency, over six successive jobs:
+
+| | 16 shards (v1.1.0) | chosen by size |
+| --- | --- | --- |
+| Restoring the Gradle User Home | 3924 ms | **2593 ms** |
+| Saving, no compaction due | ~1440 ms | **~910 ms** |
+| Cache entries after six jobs | 238 | **92** |
+| Uploaded across those six jobs | 233 MB | 224 MB |
+
+The last row is the point: sharding never reduced what was written. It spread compaction over more rounds —
+one 204 MB spike became 36, 124 and 58 MB — while making every restore slower. Restores are paid by every
+job and compaction only by a job that writes.
+
+Splitting further is actively harmful, which is why the ceiling is a size and not a count: 256 shards
+restored in 4241 → 12685 ms as entries accumulated, against 2199 → 2547 ms for one.
+
+### What this costs once
+
+Nothing is known about a bundle's size until a run has saved it, so a cold cache still splits a large bundle
+16 ways, and the following run settles on the right number. Changing the number changes what each entry
+holds, so that run saves those bundles in full once — measured at 195 MB for the fixture above, after which
+each job was back to 4 MB. Upgrading from v1.1.0 pays this once, on the first job that writes.
+
+### New environment switch
+
+| variable | effect |
+| --- | --- |
+| `GRADLE_ACTIONS_CACHE_SHARDS` | fix the shard count at 1, 2, 4, 8 or 16 instead of choosing by size |
+
+### Compatibility
+
+Entries written by v1.1.0 are readable, and their recorded sizes are what v1.2.0 uses to choose. Going back
+to v1.1.0 is safe: it ignores the size and shard-count fields it does not know and returns to sixteen.
+
+**Full changelog**: https://github.com/jacinpoz/gradle-actions/compare/v1.1.0...v1.2.0
+
 ## v1.1.0
 
 Caching. A job now uploads what its build actually added, rather than re-uploading whole cache entries
