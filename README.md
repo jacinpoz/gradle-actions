@@ -59,10 +59,17 @@ job gets faster. The download and bundle reductions apply to every job unconditi
 
 ## Using it
 
-There are no tags or releases. Pin to a commit, as you should for any third-party action:
+Bind to the major version to pick up patch releases automatically:
 
 ```yaml
-- uses: jacinpoz/gradle-actions/setup-gradle@7acc953cd2d35cfb64713540a689af1b57374013
+- uses: jacinpoz/gradle-actions/setup-gradle@v1
+```
+
+`v1` is moved to each new release. For a third-party action the safer choice is an immutable
+reference, either the exact release tag or the commit it points at:
+
+```yaml
+- uses: jacinpoz/gradle-actions/setup-gradle@v1.0.0
 ```
 
 This repository contains a set of GitHub Actions that are useful for building Gradle projects on GitHub.
@@ -95,7 +102,7 @@ jobs:
         distribution: 'temurin'
         java-version: 17
     - name: Setup Gradle
-      uses: jacinpoz/gradle-actions/setup-gradle@7acc953cd2d35cfb64713540a689af1b57374013
+      uses: jacinpoz/gradle-actions/setup-gradle@v1
     - name: Build with Gradle
       run: ./gradlew build
 ```
@@ -133,7 +140,7 @@ jobs:
         distribution: 'temurin'
         java-version: 17
     - name: Generate and submit dependency graph
-      uses: jacinpoz/gradle-actions/dependency-submission@7acc953cd2d35cfb64713540a689af1b57374013
+      uses: jacinpoz/gradle-actions/dependency-submission@v1
 ```
 
 See the [full action documentation](docs/dependency-submission.md) for more advanced usage scenarios.
@@ -162,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: jacinpoz/gradle-actions/wrapper-validation@7acc953cd2d35cfb64713540a689af1b57374013
+      - uses: jacinpoz/gradle-actions/wrapper-validation@v1
 ```
 
 See the [full action documentation](docs/wrapper-validation.md) for more advanced usage scenarios.
