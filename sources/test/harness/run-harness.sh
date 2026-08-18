@@ -12,9 +12,11 @@ cd "$(dirname "$0")/../.."   # sources/
 WORK="${HARNESS_WORK:-/tmp/gradle-actions-harness}"
 MBPS=100
 CORES=""
+LATENCY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mbps=*) MBPS="${1#*=}"; shift ;;
+        --latency=*) LATENCY="${1#*=}"; shift ;;
         --cores=*) CORES="${1#*=}"; shift ;;
         --) shift; break ;;
         *) break ;;
@@ -31,7 +33,7 @@ npx esbuild test/harness/fanout-bench.ts \
 
 # The cache service runs in its own process so that it does not compete for the client's event loop,
 # which is what a remote service does not do either.
-node test/harness/cache-server.mjs "$WORK/storage" --mbps="$MBPS" > "$WORK/server.log" 2>&1 &
+node test/harness/cache-server.mjs "$WORK/storage" --mbps="$MBPS" --latency="$LATENCY" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
@@ -42,7 +44,7 @@ for _ in $(seq 1 50); do
 done
 [[ -n "${PORT:-}" ]] || { echo "cache server did not start:"; cat "$WORK/server.log"; exit 1; }
 
-echo "cache service on port $PORT, bandwidth ${MBPS} MB/s, cores ${CORES:-all}"
+echo "cache service on port $PORT, bandwidth ${MBPS} MB/s, latency ${LATENCY} ms, cores ${CORES:-all}"
 
 mkdir -p "$WORK/workspace" "$WORK/temp"
 export ACTIONS_CACHE_URL="http://127.0.0.1:$PORT/"

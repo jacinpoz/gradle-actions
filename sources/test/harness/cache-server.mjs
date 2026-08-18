@@ -17,6 +17,10 @@ const flag = (name, fallback) => {
 }
 const port = flag('port', 0)
 const megabytesPerSecond = flag('mbps', 0)
+// Round-trip latency added to every API response. Reserving, finalizing and looking up an entry are one
+// round trip each, so this is what a cache entry costs before any of its bytes move -- and it is the cost
+// that decides whether splitting an entry into shards is worth it.
+const latencyMs = flag('latency', 0)
 
 fs.mkdirSync(storage, {recursive: true})
 
@@ -48,6 +52,10 @@ async function consume(bytes) {
     }
 }
 
+const delay = async () => {
+    if (latencyMs) await new Promise(resolve => setTimeout(resolve, latencyMs))
+}
+
 const json = (res, status, body) => {
     res.writeHead(status, {'Content-Type': 'application/json'})
     res.end(body === undefined ? '' : JSON.stringify(body))
@@ -76,6 +84,7 @@ function lookup(keys, version) {
 
 const server = http.createServer(async (req, res) => {
     try {
+        await delay()
         const url = new URL(req.url, 'http://localhost')
         // The download URL is served from the root, so the API prefix is not always there to strip.
         const route = url.pathname.replace('/_apis/artifactcache/', '').replace(/^\//, '')
