@@ -25,6 +25,55 @@ describe('cacheUtils-utils', () => {
         })
     })
 
+    describe('maps concurrently', () => {
+        it('preserving the order of the results', async () => {
+            const items = [30, 10, 20, 0]
+            const results = await cacheUtils.mapConcurrently(items, 2, async delay => {
+                await new Promise(resolve => setTimeout(resolve, delay))
+                return delay
+            })
+            expect(results).toEqual(items)
+        })
+        it('never exceeding the limit', async () => {
+            let inFlight = 0
+            let highWaterMark = 0
+            await cacheUtils.mapConcurrently([...Array(20).keys()], 3, async () => {
+                inFlight++
+                highWaterMark = Math.max(highWaterMark, inFlight)
+                await new Promise(resolve => setTimeout(resolve, 5))
+                inFlight--
+                return undefined
+            })
+            expect(highWaterMark).toBe(3)
+        })
+        it('with nothing to do', async () => {
+            expect(await cacheUtils.mapConcurrently([], 4, async () => 1)).toEqual([])
+        })
+    })
+
+    describe('bounds the cache entry fan-out', () => {
+        it('to the configured override', () => {
+            process.env['GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY'] = '3'
+            try {
+                expect(cacheUtils.entryConcurrency()).toBe(3)
+            } finally {
+                delete process.env['GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY']
+            }
+        })
+        it('ignoring an override that is not a positive whole number', () => {
+            for (const override of ['0', '-1', 'many', '2.5', '']) {
+                process.env['GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY'] = override
+                expect(cacheUtils.entryConcurrency()).toBeGreaterThanOrEqual(4)
+            }
+            delete process.env['GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY']
+        })
+        it('to a range that suits a hosted runner by default', () => {
+            const concurrency = cacheUtils.entryConcurrency()
+            expect(concurrency).toBeGreaterThanOrEqual(4)
+            expect(concurrency).toBeLessThanOrEqual(8)
+        })
+    })
+
     describe('normalizes file names', () => {
         it('leaving posix names untouched', async () => {
             const fileNames = ['/foo/bar/baz.zip', '../boo.html']

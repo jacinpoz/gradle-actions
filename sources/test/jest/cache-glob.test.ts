@@ -3,10 +3,13 @@ import os from 'os'
 import path from 'path'
 import {
     canResolvePatternLine,
+    matchedEntryParents,
     resolveEntryPattern,
+    resolveEntryPatternWithFallback,
     resolvePathsForCache,
     resolvePatternLine,
-    splitPatternRoot
+    splitPatternRoot,
+    withExplicitPaths
 } from '../../src/caching/cache-glob'
 
 let root: string
@@ -164,7 +167,9 @@ describe('resolvePatternLine', () => {
         mk('caches', 'jars-9')
         touch('caches/jars-9/real-file')
         fs.symlinkSync(path.join(root, 'missing-target'), path.join(root, 'caches/jars-9/broken'), 'file')
-        expect(resolvePatternLine(path.join(root, 'caches/jars-*/*'))).toEqual([path.join(root, 'caches/jars-9/real-file')])
+        expect(resolvePatternLine(path.join(root, 'caches/jars-*/*'))).toEqual([
+            path.join(root, 'caches/jars-9/real-file')
+        ])
     })
 
     it('excludes a symlink to a file from a directories-only pattern', () => {
@@ -312,5 +317,97 @@ describe('resolvePathsForCache', () => {
         expect(
             resolvePathsForCache([path.join(root, 'caches/jars-*/*/'), path.join(root, 'caches/jars-9/*/')])
         ).toEqual([path.join(root, 'caches/jars-9/aaa')])
+    })
+})
+
+describe('withExplicitPaths', () => {
+    const pattern = '/gradle/caches/transforms-4/*a/'
+    const paths = ['/gradle/caches/transforms-4/00a', '/gradle/caches/transforms-4/01a']
+
+    it('supplies the registered paths instead of resolving the pattern', async () => {
+        await withExplicitPaths([pattern], paths, async () => {
+            expect(resolvePathsForCache([pattern])).toEqual(paths)
+        })
+    })
+
+    it('matches the pattern however it is spaced or split', async () => {
+        await withExplicitPaths([`  ${pattern}  `, '', '  '], paths, async () => {
+            expect(resolvePathsForCache([pattern])).toEqual(paths)
+        })
+    })
+
+    it('leaves nothing registered afterwards', async () => {
+        await withExplicitPaths([pattern], paths, async () => undefined)
+        // The pattern is not under the temporary root, so resolving it for real finds nothing.
+        expect(resolvePathsForCache([pattern])).toEqual([])
+    })
+
+    it('leaves nothing registered when the action throws', async () => {
+        await expect(
+            withExplicitPaths([pattern], paths, async () => {
+                throw new Error('upload failed')
+            })
+        ).rejects.toThrow('upload failed')
+        expect(resolvePathsForCache([pattern])).toEqual([])
+    })
+
+    it('keeps concurrent registrations of different patterns apart', async () => {
+        const otherPattern = '/gradle/caches/transforms-4/*b/'
+        const otherPaths = ['/gradle/caches/transforms-4/00b']
+        await withExplicitPaths([pattern], paths, async () =>
+            withExplicitPaths([otherPattern], otherPaths, async () => {
+                expect(resolvePathsForCache([pattern])).toEqual(paths)
+                expect(resolvePathsForCache([otherPattern])).toEqual(otherPaths)
+            })
+        )
+        expect(resolvePathsForCache([pattern])).toEqual([])
+    })
+
+    // Archiving the wrong content would be worse than repeating the work, so a conflicting registration
+    // disables the override for both rather than letting either win.
+    it('declines to override when the same pattern is registered with different paths', async () => {
+        await withExplicitPaths([pattern], paths, async () =>
+            withExplicitPaths([pattern], ['/gradle/caches/transforms-4/02a'], async () => {
+                expect(resolvePathsForCache([pattern])).toEqual(paths)
+            })
+        )
+        expect(resolvePathsForCache([pattern])).toEqual([])
+    })
+})
+
+describe('resolveEntryPatternWithFallback', () => {
+    it('resolves a supported pattern itself', async () => {
+        mk('caches', '8.14', 'cc-keystore')
+        expect(await resolveEntryPatternWithFallback(path.join(root, 'caches/*/cc-keystore'))).toEqual([
+            path.join(root, 'caches/8.14/cc-keystore')
+        ])
+    })
+
+    it('falls back to @actions/glob for a pattern it does not implement', async () => {
+        mk('caches', '8.14', 'kotlin-dsl', 'scripts')
+        const matched = await resolveEntryPatternWithFallback(path.join(root, 'caches/**/scripts'))
+        expect(matched).toEqual([path.join(root, 'caches/8.14/kotlin-dsl/scripts')])
+    })
+})
+
+describe('matchedEntryParents', () => {
+    it('names the directory above the first wildcard', () => {
+        expect(matchedEntryParents('/gradle/caches/transforms-4/*a/')).toEqual(['/gradle/caches/transforms-4'])
+        expect(matchedEntryParents('/gradle/caches/modules-*/files-*/*/*/*/*')).toEqual(['/gradle/caches'])
+    })
+
+    it('names one directory per line of the pattern', () => {
+        expect(matchedEntryParents('/gradle/caches/transforms-4/*/\n/gradle/caches/*/transforms/*/')).toEqual([
+            '/gradle/caches/transforms-4',
+            '/gradle/caches'
+        ])
+    })
+
+    // A fully literal pattern names the match itself -- these are the per-file entries. Creating that path
+    // as a directory would put a directory where the file has to go.
+    it('names the containing directory of a fully literal pattern', () => {
+        expect(matchedEntryParents('/gradle/wrapper/dists/gradle-8.14-bin/abc/gradle-8.14')).toEqual([
+            '/gradle/wrapper/dists/gradle-8.14-bin/abc'
+        ])
     })
 })

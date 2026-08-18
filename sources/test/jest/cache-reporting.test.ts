@@ -1,6 +1,6 @@
 import {describe, expect, it} from '@jest/globals'
 
-import {CacheEntryListener, CacheListener} from '../../src/caching/cache-reporting'
+import {CacheEntryListener, CacheListener, generateCachingReport} from '../../src/caching/cache-reporting'
 
 describe('caching report', () => {
     describe('reports not fully restored', () => {
@@ -95,5 +95,66 @@ describe('caching report', () => {
             expect(entryClone.requestedRestoreKeys).toEqual(['2', '3'])
             expect(entryClone.savedKey).toBe('4')
         })
+    })
+})
+
+describe('caching report phases', () => {
+    // The entry index describes the cache rather than holding Gradle User Home content, so missing it costs
+    // a slower restore, not an incomplete one. Counting it would suppress the configuration-cache restore
+    // for a run whose content was in fact fully restored.
+    it('does not let a missing metadata entry mean the home was not fully restored', () => {
+        const report = new CacheListener()
+        report.entry('Gradle User Home').markRequested('1').markRestored('1', 500, 1000)
+        report.entry('index').markMetadataOnly().markRequested('2')
+        expect(report.fullyRestored).toBe(true)
+    })
+
+    it('still reports a missing content entry', () => {
+        const report = new CacheListener()
+        report.entry('index').markMetadataOnly().markRequested('1').markRestored('1', 10, 20)
+        report.entry('Gradle User Home').markRequested('2')
+        expect(report.fullyRestored).toBe(false)
+    })
+
+    it('accumulates the time spent in each phase', () => {
+        const report = new CacheListener()
+        report.addPhaseTime('resolve entry patterns', 100)
+        report.addPhaseTime('resolve entry patterns', 40)
+        report.addPhaseTime('find new paths', 7)
+        expect(report.phaseTotals).toEqual({'resolve entry patterns': 140, 'find new paths': 7})
+    })
+
+    it('carries phase totals across the main and post action steps', () => {
+        const report = new CacheListener()
+        report.addPhaseTime('resolve entry patterns', 140)
+        report.entry('foo').markKeyTime(12).markDeleteTime(34)
+
+        const rehydrated = CacheListener.rehydrate(report.stringify())
+        expect(rehydrated.phaseTotals).toEqual({'resolve entry patterns': 140})
+        expect(rehydrated.entry('foo').keyMs).toBe(12)
+        expect(rehydrated.entry('foo').deleteMs).toBe(34)
+    })
+
+    // State written by an earlier version of the action has no phase totals at all.
+    it('rehydrates state that predates phase timings', () => {
+        const rehydrated = CacheListener.rehydrate('{"cacheEntries":[],"cacheReadOnly":false}')
+        expect(rehydrated.phaseTotals).toEqual({})
+        rehydrated.addPhaseTime('resolve entry patterns', 5)
+        expect(rehydrated.phaseTotals).toEqual({'resolve entry patterns': 5})
+    })
+
+    it('reports the phases it timed, and only those', () => {
+        const report = new CacheListener()
+        report.addPhaseTime('resolve entry patterns', 140)
+        report.entry('foo').markDeleteTime(34)
+
+        const rendered = generateCachingReport(report)
+        expect(rendered).toContain('<tr><td>resolve entry patterns</td><td>140</td></tr>')
+        expect(rendered).toContain('<tr><td>delete extracted content</td><td>34</td></tr>')
+        expect(rendered).not.toContain('hash cache keys')
+    })
+
+    it('reports no phase table for a job that ran none of them', () => {
+        expect(generateCachingReport(new CacheListener())).not.toContain('Action Phase')
     })
 })

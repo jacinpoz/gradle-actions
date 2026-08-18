@@ -1,4 +1,9 @@
-import {hexShardSuffixes, shardPattern, shardSuffixForPath} from '../../src/caching/gradle-home-extry-extractor'
+import {
+    ExtractedCacheEntryDefinition,
+    hexShardSuffixes,
+    shardPattern,
+    shardSuffixForPath
+} from '../../src/caching/gradle-home-extry-extractor'
 
 describe('hexShardSuffixes', () => {
     it('enumerates 16 shards for a single character', () => {
@@ -116,5 +121,49 @@ describe('shardSuffixForPath', () => {
         const a = shardSuffixForPath('/x/caches/modules-2/files-2.1/g1/m1/1.0/deadbeef', 1)
         const b = shardSuffixForPath('/x/caches/modules-2/files-2.1/g2/m2/9.9/deadbeef', 1)
         expect(a).toBe(b)
+    })
+})
+
+describe('shouldShard', () => {
+    const bundle = (suffixLength: number): ExtractedCacheEntryDefinition =>
+        new ExtractedCacheEntryDefinition('transforms', '/gradle/caches/transforms-4/*/', true).withHexShards(
+            suffixLength
+        )
+
+    it('never shards a bundle that was not annotated for it', () => {
+        const unsharded = new ExtractedCacheEntryDefinition('groovy-dsl', '/gradle/caches/*/groovy-dsl/*/', true)
+        expect(unsharded.shouldShard(100000)).toBe(false)
+    })
+
+    // Sixteen entries each holding a handful of paths cost sixteen reservations, uploads and finalizations
+    // to save what one entry would, and there is little blast radius left to reduce.
+    it('leaves a small bundle whole', () => {
+        expect(bundle(1).shouldShard(0)).toBe(false)
+        expect(bundle(1).shouldShard(511)).toBe(false)
+    })
+
+    it('shards a bundle big enough for every shard to be worth an entry', () => {
+        expect(bundle(1).shouldShard(512)).toBe(true)
+        expect(bundle(1).shouldShard(185685)).toBe(true)
+    })
+
+    it('scales the threshold with the number of shards', () => {
+        expect(bundle(2).shouldShard(512)).toBe(false)
+        expect(bundle(2).shouldShard(8192)).toBe(true)
+    })
+})
+
+describe('the local build cache', () => {
+    // 'caches/build-cache-1/*' matches the cache entries, which are named by content hash, alongside two
+    // files that must stay in the Gradle User Home. Only paths ending in a hex character belong to a shard,
+    // so those two are left where they are -- which is what is wanted for a lock file in particular.
+    it('shards its content-addressed entries', () => {
+        expect(shardSuffixForPath('/gradle/caches/build-cache-1/006cbc5b15b9804a96d4de94d6e1acc3', 1)).toBe('3')
+        expect(shardSuffixForPath('/gradle/caches/build-cache-1/fee1e974fb8e7da2610ddf6afb3385b0', 1)).toBe('0')
+    })
+
+    it('leaves its bookkeeping files out of every shard', () => {
+        expect(shardSuffixForPath('/gradle/caches/build-cache-1/gc.properties', 1)).toBeUndefined()
+        expect(shardSuffixForPath('/gradle/caches/build-cache-1/build-cache-1.lock', 1)).toBeUndefined()
     })
 })

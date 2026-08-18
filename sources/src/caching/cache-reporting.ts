@@ -28,6 +28,16 @@ export const CLEANUP_DISABLED_DUE_TO_CONFIG_CACHE_HIT =
  */
 export class CacheListener {
     cacheEntries: CacheEntryListener[] = []
+
+    /**
+     * Wall-clock totals for work the action does itself, outside the `@actions/cache` calls that
+     * `CacheEntryListener` already times: resolving entry patterns, hashing cache keys, and deleting
+     * extracted content from the Gradle User Home.
+     *
+     * On a large Gradle User Home these phases dominate, and none of them are visible in the per-entry
+     * restore and save times, so a regression in any of them is otherwise invisible in the job summary.
+     */
+    phaseTotals: Record<string, number> = {}
     cacheReadOnly = false
     cacheWriteOnly = false
     cacheDisabled = false
@@ -35,7 +45,10 @@ export class CacheListener {
     cacheCleanupMessage: string = DEFAULT_CLEANUP_DISABLED_REASON
 
     get fullyRestored(): boolean {
-        return this.cacheEntries.every(x => !x.wasRequestedButNotRestored())
+        // Metadata entries are excluded: they describe the cache rather than holding Gradle User Home
+        // content, so missing one costs a slower restore, not an incomplete one. Counting them here would
+        // suppress the configuration-cache restore for a run whose content was in fact fully restored.
+        return this.cacheEntries.every(x => x.metadataOnly || !x.wasRequestedButNotRestored())
     }
 
     get cacheStatus(): string {
@@ -71,6 +84,10 @@ export class CacheListener {
         this.cacheCleanupMessage = reason
     }
 
+    addPhaseTime(phase: string, milliseconds: number): void {
+        this.phaseTotals[phase] = (this.phaseTotals[phase] ?? 0) + milliseconds
+    }
+
     entry(name: string): CacheEntryListener {
         for (const entry of this.cacheEntries) {
             if (entry.entryName === name) {
@@ -92,6 +109,8 @@ export class CacheListener {
             return new CacheListener()
         }
         const rehydrated: CacheListener = Object.assign(new CacheListener(), JSON.parse(stringRep))
+        // State written by an older version of the action has no phase totals.
+        rehydrated.phaseTotals = rehydrated.phaseTotals ?? {}
         const entries = rehydrated.cacheEntries
         for (let index = 0; index < entries.length; index++) {
             const rawEntry = entries[index]
@@ -117,6 +136,13 @@ export class CacheEntryListener {
     savedSize: number | undefined
     savedTime: number | undefined
     notSaved: string | undefined
+
+    /** Time spent hashing this entry's cache key, and deleting its content from the Gradle User Home. */
+    keyMs: number | undefined
+    deleteMs: number | undefined
+
+    /** Set for an entry that holds metadata about the cache rather than Gradle User Home content. */
+    metadataOnly = false
 
     constructor(entryName: string) {
         this.entryName = entryName
@@ -161,6 +187,28 @@ export class CacheEntryListener {
         this.notSaved = message
         return this
     }
+
+    markMetadataOnly(): CacheEntryListener {
+        this.metadataOnly = true
+        return this
+    }
+
+    markKeyTime(milliseconds: number): CacheEntryListener {
+        this.keyMs = milliseconds
+        return this
+    }
+
+    markDeleteTime(milliseconds: number): CacheEntryListener {
+        this.deleteMs = milliseconds
+        return this
+    }
+}
+
+/** Records the wall-clock time a synchronous phase took, and returns both. */
+export function measure<T>(action: () => T): {result: T; milliseconds: number} {
+    const startTime = Date.now()
+    const result = action()
+    return {result, milliseconds: Date.now() - startTime}
 }
 
 export function generateCachingReport(listener: CacheListener): string {
@@ -174,6 +222,7 @@ export function generateCachingReport(listener: CacheListener): string {
 - ${listener.cacheCleanupMessage}
 
 ${renderEntryTable(entries)}
+${renderPhaseTable(listener)}
 
 <h5>Cache Entry Details</h5>
 <pre>
@@ -201,6 +250,34 @@ function renderEntryTable(entries: CacheEntryListener[]): string {
     `
 }
 
+/**
+ * Renders the time spent in the action's own phases, if any was recorded. Nothing is emitted when no
+ * phase ran, so a job with caching disabled does not grow an empty table.
+ */
+function renderPhaseTable(listener: CacheListener): string {
+    const entries = listener.cacheEntries
+    const phases: [string, number][] = [
+        ...Object.entries(listener.phaseTotals),
+        ['hash cache keys', getTime(entries, e => e.keyMs)],
+        ['delete extracted content', getTime(entries, e => e.deleteMs)]
+    ]
+    const timedPhases = phases.filter(([, milliseconds]) => milliseconds > 0)
+
+    if (timedPhases.length === 0) {
+        return ''
+    }
+
+    const rows = timedPhases
+        .map(([phase, milliseconds]) => `    <tr><td>${phase}</td><td>${milliseconds}</td></tr>`)
+        .join('\n')
+    return `
+<table>
+    <tr><th>Action Phase</th><th>Total Time (ms)</th></tr>
+${rows}
+</table>
+    `
+}
+
 function renderEntryDetails(listener: CacheListener): string {
     return listener.cacheEntries
         .map(
@@ -214,9 +291,21 @@ function renderEntryDetails(listener: CacheListener): string {
               Size: ${formatSize(entry.savedSize)}
               Time: ${formatTime(entry.savedTime)}
               ${getSavedMessage(entry, listener.cacheReadOnly)}
-`
+${renderEntryPhases(entry)}`
         )
         .join('---\n')
+}
+
+function renderEntryPhases(entry: CacheEntryListener): string {
+    const phases: [string, number | undefined][] = [
+        ['Key  Time', entry.keyMs],
+        ['Del  Time', entry.deleteMs]
+    ]
+
+    return phases
+        .filter(([, milliseconds]) => milliseconds !== undefined && milliseconds > 0)
+        .map(([label, milliseconds]) => `    ${label} : ${formatTime(milliseconds)}\n`)
+        .join('')
 }
 
 function getRestoredMessage(entry: CacheEntryListener, cacheWriteOnly: boolean): string {

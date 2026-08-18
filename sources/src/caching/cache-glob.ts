@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import * as glob from '@actions/glob'
 
 /**
  * Resolves the glob patterns used for cache entry definitions, reading only the directories a pattern
@@ -206,6 +207,33 @@ export function resolveEntryPattern(pattern: string): string[] {
 }
 
 /**
+ * The directories that could contain a match of the pattern, one per line of it: the deepest directory
+ * above the first wildcard segment, or the containing directory of a fully literal pattern.
+ *
+ * Used to create those directories before several `tar` processes extract into the same tree at once, so
+ * that none of them races another to create a shared parent.
+ */
+export function matchedEntryParents(pattern: string): string[] {
+    return patternLines(pattern).map(line => {
+        const normalized = line.endsWith('/') ? line.slice(0, -1) : line
+        const {root, segments} = splitPatternRoot(normalized)
+
+        let parent = root
+        for (const [index, segment] of segments.entries()) {
+            if (segment.includes('*')) {
+                return parent
+            }
+            // A fully literal pattern names the match itself, so its parent is one level up.
+            if (index === segments.length - 1) {
+                return parent
+            }
+            parent = path.join(parent, segment)
+        }
+        return parent
+    })
+}
+
+/**
  * Whether this resolver implements everything the given pattern uses.
  *
  * The cache entry patterns this action defines use only `*` within a single segment and a trailing
@@ -215,6 +243,88 @@ export function resolveEntryPattern(pattern: string): string[] {
  */
 export function canResolvePatternLine(pattern: string): boolean {
     return !pattern.startsWith('!') && !pattern.includes('**') && !/[?[\]{}()]/.test(pattern)
+}
+
+/** Splits a pattern into its non-empty lines. */
+function patternLines(pattern: string): string[] {
+    return pattern
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+}
+
+/**
+ * Resolves a pattern with this resolver where it can, and with `@actions/glob` where it cannot.
+ *
+ * Used for patterns that come from action inputs rather than from the entry definitions, where any shape
+ * `@actions/glob` accepts is legal.
+ *
+ * The gain here is small, unlike for the entry patterns: `@actions/glob` prunes a subtree as soon as it
+ * cannot partially match, so the default exclusion `caches/*\/cc-keystore` costs it 3 ms against 0 ms for
+ * this resolver on a Gradle User Home of 186k paths. What it does buy is that an exclusion of the shape the
+ * entry definitions use no longer pays `@actions/glob`'s per-path matching cost, which is what makes it 84x
+ * slower on a pattern that matches a lot.
+ */
+export async function resolveEntryPatternWithFallback(pattern: string): Promise<string[]> {
+    const lines = patternLines(pattern)
+    if (lines.length > 0 && lines.every(canResolvePatternLine)) {
+        return resolveEntryPattern(lines.join('\n'))
+    }
+
+    const globber = await glob.create(pattern, {implicitDescendants: false})
+    return globber.glob()
+}
+
+/**
+ * Paths registered by `withExplicitPaths`, keyed by the normalized pattern they stand in for.
+ */
+const explicitPaths = new Map<string, {paths: string[]; refCount: number}>()
+
+/** The key a set of pattern lines is registered under. */
+function patternKey(patterns: string[]): string {
+    return patternLines(patterns.join('\n')).join('\n')
+}
+
+/**
+ * Runs `action` with the paths `@actions/cache` should archive for `patterns` supplied directly, instead of
+ * resolved from the patterns again.
+ *
+ * The caller has usually already resolved the pattern -- and, for a sharded bundle, partitioned the result
+ * -- so resolving it a second time inside `@actions/cache` repeats the same directory reads once per shard.
+ * It also lets an entry archive a subset of what its pattern matches, which is what makes an incremental
+ * layer possible: the pattern still determines the cache version, so save and restore agree, while the
+ * archive holds only the paths the caller names.
+ *
+ * The registration is scoped to `action` and reference counted, so a pattern is never left overridden. If
+ * the same pattern is somehow registered twice with different paths, neither override is applied and the
+ * paths are resolved normally: archiving the wrong content would be worse than repeating the work.
+ */
+export async function withExplicitPaths<T>(patterns: string[], paths: string[], action: () => Promise<T>): Promise<T> {
+    const key = patternKey(patterns)
+    const existing = explicitPaths.get(key)
+
+    if (existing && !samePaths(existing.paths, paths)) {
+        return action()
+    }
+
+    if (existing) {
+        existing.refCount++
+    } else {
+        explicitPaths.set(key, {paths, refCount: 1})
+    }
+
+    try {
+        return await action()
+    } finally {
+        const registered = explicitPaths.get(key)
+        if (registered && --registered.refCount <= 0) {
+            explicitPaths.delete(key)
+        }
+    }
+}
+
+function samePaths(one: string[], other: string[]): boolean {
+    return one.length === other.length && one.every((entry, index) => entry === other[index])
 }
 
 /**
@@ -227,7 +337,13 @@ export function canResolvePatternLine(pattern: string): boolean {
  * patch-package patch on that library.
  */
 export function resolvePathsForCache(patterns: string[]): string[] | undefined {
-    const lines = patterns.map(line => line.trim()).filter(line => line.length > 0)
+    const lines = patternLines(patterns.join('\n'))
+
+    const explicit = explicitPaths.get(lines.join('\n'))
+    if (explicit) {
+        return explicit.paths
+    }
+
     if (lines.length === 0 || !lines.every(canResolvePatternLine)) {
         return undefined
     }

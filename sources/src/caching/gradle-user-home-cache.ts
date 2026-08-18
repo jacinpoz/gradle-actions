@@ -1,6 +1,5 @@
 import * as core from '@actions/core'
 import * as exec from '@actions/exec'
-import * as glob from '@actions/glob'
 
 import path from 'path'
 import fs from 'fs'
@@ -9,13 +8,21 @@ import {CacheListener} from './cache-reporting'
 import {saveCache, restoreCache, cacheDebug, isCacheDebuggingEnabled, tryDelete} from './cache-utils'
 import {CacheConfig, ACTION_METADATA_DIR} from '../configuration'
 import {GradleHomeEntryExtractor, ConfigurationCacheEntryExtractor} from './gradle-home-extry-extractor'
+import {resolveEntryPatternWithFallback} from './cache-glob'
 import {getPredefinedToolchains, mergeToolchainContent, readResourceFileAsString} from './gradle-user-home-utils'
 
 const RESTORED_CACHE_KEY_KEY = 'restored-cache-key'
+const PARALLEL_RESTORE_VAR = 'GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE'
+
+/** The metadata files naming the extracted cache entries, relative to the action metadata directory. */
+const ENTRY_METADATA_PATTERN = '*-entry-metadata.json'
 
 export class GradleUserHomeCache {
     private readonly cacheName = 'home'
     private readonly cacheDescription = 'Gradle User Home'
+
+    private readonly indexCacheName = 'home-index'
+    private readonly indexCacheDescription = 'Gradle User Home entry index'
 
     private readonly userHome: string
     private readonly gradleUserHome: string
@@ -60,8 +67,37 @@ export class GradleUserHomeCache {
     restoreKeys:[${cacheKey.restoreKeys}]`
         )
 
+        // The extracted cache entries are named in metadata files that are themselves stored inside the
+        // Gradle User Home entry, so restoring them used to wait for the largest entry in the cache to
+        // finish downloading. Restoring that metadata first, as a few kilobytes under a key of its own,
+        // lets the Gradle User Home entry and every extracted entry transfer at the same time. Their
+        // contents are disjoint: extraction deletes the extracted paths before the home is archived.
+        const indexRestored = await this.restoreEntryIndex(listener)
+
+        // Started before the Gradle User Home restore, not after: the extractor reads the metadata files
+        // synchronously before it awaits anything, so beginning here guarantees the read happens before
+        // the Gradle User Home archive can rewrite them with its own copy. A failure is reported and
+        // otherwise ignored -- attached here rather than at the await below, so a rejection is never left
+        // unhandled while the Gradle User Home entry is still downloading.
+        const extractor = new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig)
+        const extractedRestore = indexRestored
+            ? extractor.restoreEntries(listener).catch(error => {
+                  core.warning(`Restore of extracted cache entries failed: ${error}`)
+                  return undefined
+              })
+            : Promise.resolve(undefined)
+
         const cachePath = this.getCachePath()
         const cacheResult = await restoreCache(cachePath, cacheKey.key, cacheKey.restoreKeys, entryListener)
+
+        // Written only now that the Gradle User Home archive has finished extracting: it holds its own copy
+        // of these metadata files, from before this restore, and would otherwise overwrite what was just
+        // learnt about which entries are actually present.
+        const restored = await extractedRestore
+        if (restored) {
+            extractor.persistRestored(restored)
+        }
+
         if (!cacheResult) {
             core.info(`${this.cacheDescription} cache not found. Will initialize empty.`)
             return
@@ -70,7 +106,7 @@ export class GradleUserHomeCache {
         core.saveState(RESTORED_CACHE_KEY_KEY, cacheResult.key)
 
         try {
-            await this.afterRestore(listener)
+            await this.afterRestore(listener, indexRestored)
         } catch (error) {
             core.warning(`Restore ${this.cacheDescription} failed in 'afterRestore': ${error}`)
         }
@@ -78,13 +114,49 @@ export class GradleUserHomeCache {
 
     /**
      * Restore any extracted cache entries after the main Gradle User Home entry is restored.
+     *
+     * The Gradle Home entries are restored here only when the entry index was not available, in which case
+     * the metadata naming them arrived with the Gradle User Home entry that has just been extracted.
      */
-    async afterRestore(listener: CacheListener): Promise<void> {
+    async afterRestore(listener: CacheListener, extractedEntriesAlreadyRestored = false): Promise<void> {
         await this.debugReportGradleUserHomeSize('as restored from cache')
-        await new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
+        if (!extractedEntriesAlreadyRestored) {
+            await new GradleHomeEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
+        }
         await new ConfigurationCacheEntryExtractor(this.gradleUserHome, this.cacheConfig).restore(listener)
         await this.deleteExcludedPaths()
         await this.debugReportGradleUserHomeSize('after restoring common artifacts')
+    }
+
+    /**
+     * Restores the metadata naming the extracted cache entries, reporting whether it was found.
+     *
+     * Keyed exactly as the Gradle User Home entry is, so the two always match each other: the same job,
+     * matrix and commit, falling back through the same restore keys.
+     */
+    private async restoreEntryIndex(listener: CacheListener): Promise<boolean> {
+        if (process.env[PARALLEL_RESTORE_VAR] === 'false') {
+            return false
+        }
+
+        const cacheKey = generateCacheKey(this.indexCacheName, this.cacheConfig)
+        const entryListener = listener.entry(this.indexCacheDescription).markMetadataOnly()
+        const result = await restoreCache(this.getIndexCachePath(), cacheKey.key, cacheKey.restoreKeys, entryListener)
+        return result !== undefined
+    }
+
+    private async saveEntryIndex(listener: CacheListener): Promise<void> {
+        if (process.env[PARALLEL_RESTORE_VAR] === 'false') {
+            return
+        }
+
+        const cacheKey = generateCacheKey(this.indexCacheName, this.cacheConfig).key
+        const entryListener = listener.entry(this.indexCacheDescription).markMetadataOnly()
+        await saveCache(this.getIndexCachePath(), cacheKey, entryListener)
+    }
+
+    private getIndexCachePath(): string[] {
+        return [path.resolve(this.gradleUserHome, ACTION_METADATA_DIR, ENTRY_METADATA_PATTERN)]
     }
 
     /**
@@ -119,6 +191,10 @@ export class GradleUserHomeCache {
             return
         }
 
+        // Saved before the Gradle User Home entry: it is a few kilobytes, and the entries it names were
+        // already saved by 'beforeSave', so it remains valid even if the much larger entry fails to upload.
+        await this.saveEntryIndex(listener)
+
         const cachePath = this.getCachePath()
         await saveCache(cachePath, cacheKey, gradleHomeEntryListener)
         return
@@ -147,13 +223,13 @@ export class GradleUserHomeCache {
         rawPaths.push('caches/*/cc-keystore')
         const resolvedPaths = rawPaths.map(x => path.resolve(this.gradleUserHome, x))
 
-        for (const p of resolvedPaths) {
-            cacheDebug(`Removing excluded path: ${p}`)
-            const globber = await glob.create(p, {
-                implicitDescendants: false
-            })
+        for (const excludedPath of resolvedPaths) {
+            cacheDebug(`Removing excluded path: ${excludedPath}`)
 
-            for (const toDelete of await globber.glob()) {
+            // Resolved by targeted readdir where the pattern allows it, as the entry patterns are. This
+            // runs once after restoring and once before saving, and an exclusion may name as much of the
+            // Gradle User Home as an entry pattern does.
+            for (const toDelete of await resolveEntryPatternWithFallback(excludedPath)) {
                 cacheDebug(`Removing excluded file: ${toDelete}`)
                 await tryDelete(toDelete)
             }
