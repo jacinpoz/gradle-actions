@@ -1,7 +1,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import {resolveEntryPattern, resolvePatternLine} from '../../src/caching/cache-glob'
+import {resolveEntryPattern, resolvePatternLine, splitPatternRoot} from '../../src/caching/cache-glob'
 
 let root: string
 
@@ -207,5 +207,47 @@ describe('resolveEntryPattern', () => {
         mk('caches', 'jars-9', 'a')
         const found = resolveEntryPattern(`\n${path.join(root, 'caches/jars-*/*/')}\n\n`)
         expect(found).toEqual([path.join(root, 'caches/jars-9/a')])
+    })
+})
+
+// The Windows cases below are why splitPatternRoot takes a path flavour: a drive letter joined onto a
+// leading separator produces '\D:\...', a path rooted on the current drive that cannot exist, so every
+// absolute pattern resolved to nothing and the action cached nothing at all on Windows runners.
+describe('splitPatternRoot', () => {
+    it('keeps a Windows drive letter in the root', () => {
+        expect(splitPatternRoot('D:\\a\\.gradle\\wrapper\\dists\\*\\*', path.win32)).toEqual({
+            root: 'D:\\',
+            segments: ['a', '.gradle', 'wrapper', 'dists', '*', '*']
+        })
+    })
+
+    it('rebuilds a Windows path from its own root and segments', () => {
+        const {root, segments} = splitPatternRoot('D:\\a\\.gradle\\caches', path.win32)
+        expect(path.win32.join(root, ...segments)).toBe('D:\\a\\.gradle\\caches')
+    })
+
+    it('keeps a UNC share in the root', () => {
+        expect(splitPatternRoot('\\\\server\\share\\caches\\*', path.win32)).toEqual({
+            root: '\\\\server\\share\\',
+            segments: ['caches', '*']
+        })
+    })
+
+    it('splits a posix path at the leading slash', () => {
+        expect(splitPatternRoot('/home/runner/.gradle/caches/*', path.posix)).toEqual({
+            root: '/',
+            segments: ['home', 'runner', '.gradle', 'caches', '*']
+        })
+    })
+
+    it('reports no root for a relative pattern', () => {
+        expect(splitPatternRoot('caches/*/transforms', path.posix)).toEqual({
+            root: '',
+            segments: ['caches', '*', 'transforms']
+        })
+    })
+
+    it('reports no segments for a bare root', () => {
+        expect(splitPatternRoot('/', path.posix)).toEqual({root: '/', segments: []})
     })
 })

@@ -84,6 +84,25 @@ function direntExists(entry: fs.Dirent, full: string): boolean {
 }
 
 /**
+ * Split a pattern into its filesystem root and the segments below it.
+ *
+ * The root has to come from `path.parse` rather than being rebuilt from a separator. On Windows a
+ * pattern begins with a drive letter, and joining `D:` onto a leading `\` yields `\D:\...`, a path
+ * rooted on the current drive that cannot exist -- so every absolute pattern resolved to nothing and
+ * nothing was cached at all. This also keeps UNC roots such as `\\server\share\` intact.
+ *
+ * `pathApi` is a parameter only so that both platforms can be tested from either.
+ */
+export function splitPatternRoot(normalized: string, pathApi: typeof path = path): {root: string; segments: string[]} {
+    const root = pathApi.parse(normalized).root
+    const segments = normalized
+        .slice(root.length)
+        .split(pathApi.sep)
+        .filter(segment => segment.length > 0)
+    return {root, segments}
+}
+
+/**
  * Resolve a single-line absolute glob pattern.
  *
  * A trailing slash restricts matches to directories; without one, files and directories both match,
@@ -93,7 +112,7 @@ export function resolvePatternLine(pattern: string): string[] {
     const directoriesOnly = pattern.endsWith('/')
     const normalized = directoriesOnly ? pattern.slice(0, -1) : pattern
 
-    const segments = normalized.split(path.sep).filter(segment => segment.length > 0)
+    const {root: patternRoot, segments} = splitPatternRoot(normalized)
     if (segments.length === 0) {
         return []
     }
@@ -101,7 +120,7 @@ export function resolvePatternLine(pattern: string): string[] {
     // Follow the leading literal segments without listing anything: this is what keeps the resolver
     // off unrelated subtrees such as modules-2 when matching transforms.
     let index = 0
-    let root = path.isAbsolute(normalized) ? path.sep : ''
+    let root = patternRoot
     while (index < segments.length && !segments[index].includes('*')) {
         root = path.join(root, segments[index])
         index++
