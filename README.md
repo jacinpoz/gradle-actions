@@ -4,19 +4,66 @@
 > **This is an unofficial derivative of [gradle/actions](https://github.com/gradle/actions), not the official action.**
 > It is not published, endorsed or supported by Gradle Inc. For the official action, use `gradle/actions`.
 >
-> It is derived from tag **v5.0.2**, the last release whose caching implementation is MIT-licensed. From
-> v6.0.0 upstream moved caching into `gradle-actions-caching`, a closed-source component governed by the
-> [Gradle Technologies Terms of Use](https://gradle.com/legal/gradle-technologies-terms-of-use/), which for
-> private repositories is offered as a time-limited free preview. This derivative exists to stay on
-> MIT-licensed caching, and to carry npm security fixes that upstream never backported to v5.
->
-> Changes relative to v5.0.2:
-> - Large bundle cache entries (`dependencies`, `transforms`, `kotlin-dsl`) are sharded into 16 entries on
->   the trailing character of Gradle's content hash, so one changed artifact invalidates one shard rather
->   than the whole bundle, and shards restore concurrently. See `sources/src/caching/`.
-> - npm vulnerabilities reduced from 21 (3 critical, 10 high) to 6, lockfile-only.
->
-> See [NOTICE](NOTICE) for attribution and provenance.
+> See [NOTICE](NOTICE) for attribution and provenance, and the section below for what differs from upstream.
+
+## Why this fork exists
+
+It is derived from tag **v5.0.2**, the last release of `gradle/actions` whose caching implementation is
+MIT-licensed. From v6.0.0 upstream moved caching into `gradle-actions-caching`, a closed-source component
+governed by the [Gradle Technologies Terms of Use](https://gradle.com/legal/gradle-technologies-terms-of-use/),
+which for private repositories is offered as a time-limited free preview.
+
+There is no v5 maintenance branch, so v5.0.2 also never received the security fixes that went into v6.
+This fork exists to stay on MIT-licensed caching and to carry those fixes forward.
+
+## What differs from v5.0.2
+
+**Security.** `npm audit` on the imported tree reported 21 vulnerabilities (3 critical, 10 high). It now
+reports 1, which is a development-only `esbuild` advisory that is never shipped in `dist/`. The vendored
+test configuration also required `@gradle-tech/develocity-agent`, a proprietary Gradle Technologies
+package that upstream never declared as a dependency; it has been removed, so the test suite runs from a
+clean checkout and no proprietary component remains.
+
+**Extracted-entry caching was broken on Windows.** Cache entry patterns are anchored at the Gradle User
+Home, and the resolver rebuilt each pattern's root from the path separator. On Windows that turned
+`D:\...` into `\D:\...`, a path that cannot exist, so every pattern resolved to nothing: no extracted
+cache entry was saved or restored. Upstream's integration tests for those entries run only on Linux.
+
+**Large caches could not be saved at all.** `@actions/cache` resolves the paths it archives with
+`@actions/glob`, which descends by spreading a directory's children into `stack.push(...)`. A
+`caches/transforms-4` holding ~178k entries overflows the call stack, so saving failed outright with
+`Maximum call stack size exceeded`. That ceiling sits inside the dependency, so it could not be lifted
+from the action alone; it is fixed by a patch.
+
+**Caching performance.** Cache entry patterns are resolved by reading only the directories a pattern can
+match, rather than walking the tree beneath its search root and filtering, and that resolver is also
+supplied to `@actions/cache` so the work is not repeated when the archive is built. Large bundle entries
+are sharded 16 ways on the trailing character of Gradle's content hash, so one changed artifact
+invalidates one shard rather than the whole bundle, and shards transfer concurrently.
+
+**Action startup.** Source maps are no longer committed (nothing reads them at runtime), and `cheerio`
+was replaced by a pattern match for the one directory-index scrape that used it.
+
+| | v5.0.2 | this fork |
+|---|---|---|
+| `npm audit` | 21 (3 critical, 10 high) | 1 (low, dev-only) |
+| Repository downloaded per job | 15.5 MB | 2.7 MB |
+| `setup-gradle` bundle | 4.7 MB | 1.8 MB |
+| Cache key for the `transforms` entry | ~9.5 s | 142 ms |
+| Path resolution when saving that entry | crashed | 1.3 s |
+| Extracted-entry caching on Windows | broken | working |
+
+The timings are measured against a Gradle User Home with ~178k transform directories. A small cache
+will not see them: their value there is that the failure modes above no longer apply, not that every
+job gets faster. The download and bundle reductions apply to every job unconditionally.
+
+## Using it
+
+There are no tags or releases. Pin to a commit, as you should for any third-party action:
+
+```yaml
+- uses: jacinpoz/gradle-actions/setup-gradle@7acc953cd2d35cfb64713540a689af1b57374013
+```
 
 This repository contains a set of GitHub Actions that are useful for building Gradle projects on GitHub.
 
@@ -48,7 +95,7 @@ jobs:
         distribution: 'temurin'
         java-version: 17
     - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v5
+      uses: jacinpoz/gradle-actions/setup-gradle@7acc953cd2d35cfb64713540a689af1b57374013
     - name: Build with Gradle
       run: ./gradlew build
 ```
@@ -86,7 +133,7 @@ jobs:
         distribution: 'temurin'
         java-version: 17
     - name: Generate and submit dependency graph
-      uses: gradle/actions/dependency-submission@v5
+      uses: jacinpoz/gradle-actions/dependency-submission@7acc953cd2d35cfb64713540a689af1b57374013
 ```
 
 See the [full action documentation](docs/dependency-submission.md) for more advanced usage scenarios.
@@ -115,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: gradle/actions/wrapper-validation@v5
+      - uses: jacinpoz/gradle-actions/wrapper-validation@7acc953cd2d35cfb64713540a689af1b57374013
 ```
 
 See the [full action documentation](docs/wrapper-validation.md) for more advanced usage scenarios.
