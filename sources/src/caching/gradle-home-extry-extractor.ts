@@ -65,6 +65,20 @@ const MAX_PRUNE_FRACTION = 0.1
  */
 const MODIFIED_SINCE_MARGIN_MS = 1000
 
+/**
+ * Overrides how many shards a bundle is split into: 16 to the power of this, so 0 is one entry, 1 is
+ * sixteen and 2 is two hundred and fifty-six.
+ *
+ * Sharding was introduced to limit how much one changed artifact invalidates. Layers now do that directly,
+ * which raises the question of whether sixteen is still the right number: each shard costs its own
+ * reservation, upload and finalization to save, and its own lookup to restore. This exists to answer that
+ * with measurements rather than argument; it is not something a workflow should set.
+ */
+function shardSuffixLengthOverride(): number | undefined {
+    const override = Number(process.env['GRADLE_ACTIONS_CACHE_SHARD_SUFFIX_LENGTH'])
+    return Number.isInteger(override) && override >= 0 && override <= 2 ? override : undefined
+}
+
 /** Whether incremental layers are enabled. Set the variable to 'false' to always save a full entry. */
 function layeringEnabled(): boolean {
     return process.env[LAYERS_VAR] !== 'false'
@@ -171,7 +185,7 @@ export class ExtractedCacheEntryDefinition {
      * extracted at all.
      */
     withHexShards(suffixLength: number): ExtractedCacheEntryDefinition {
-        this.shardSuffixLength = suffixLength
+        this.shardSuffixLength = shardSuffixLengthOverride() ?? suffixLength
         return this
     }
 

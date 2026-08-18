@@ -116,8 +116,12 @@ async function main(): Promise<void> {
             const verified = last.missing.length === 0 ? 'yes' : `NO (${last.missing.length} missing)`
             console.log(
                 `${concurrency.padStart(8)}      ` +
-                    `${best(o => o.saveMs).toFixed(0).padStart(7)} ms   ` +
-                    `${best(o => o.restoreMs).toFixed(0).padStart(7)} ms   ` +
+                    `${best(o => o.saveMs)
+                        .toFixed(0)
+                        .padStart(7)} ms   ` +
+                    `${best(o => o.restoreMs)
+                        .toFixed(0)
+                        .padStart(7)} ms   ` +
                     `${String(last.entries).padStart(9)}   ` +
                     `${mib(last.bytes).padStart(6)} MB   ${verified}`
             )
@@ -130,21 +134,66 @@ async function main(): Promise<void> {
         }
     }
 
+    // Successive jobs against one cache, which is what a repository actually experiences: each round
+    // restores, builds a little, and saves. Layer chains are capped, so one round in four collapses back
+    // to a full base -- a single incremental round does not show that, and it is most of the cost.
+    if (scenario === 'steady') {
+        const rounds = Number(flag('rounds', '5'))
+        console.log('round   restore     save     uploaded   entries written   cache entries')
+
+        await resetServer()
+        process.env['GRADLE_BUILD_ACTION_CACHE_KEY_JOB_EXECUTION'] = 'commit-0'
+        const before = freshHome()
+        await cache().save(new CacheListener())
+        let previous = await serverStats()
+        console.log(
+            `cold   ${''.padStart(8)}   ${''.padStart(6)}   ${mib(previous.bytes).padStart(5)} MB   ` +
+                `${String(previous.entries).padStart(13)}   ${String(previous.entries).padStart(11)}`
+        )
+
+        const added: string[] = []
+        for (let round = 1; round <= rounds; round++) {
+            emptyHome()
+            const restoreMs = await elapsed(async () => cache().restore(new CacheListener()))
+
+            process.env['GRADLE_BUILD_ACTION_CACHE_KEY_JOB_EXECUTION'] = `commit-${round}`
+            added.push(...mutate(gradleUserHome, {transforms: 400, dependencies: 20}, `r${round}`))
+            const saveMs = await elapsed(async () => cache().save(new CacheListener()))
+            const now = await serverStats()
+
+            console.log(
+                `${String(round).padStart(5)}   ${restoreMs.toFixed(0).padStart(6)} ms   ` +
+                    `${saveMs.toFixed(0).padStart(5)} ms   ${mib(now.bytes - previous.bytes).padStart(5)} MB   ` +
+                    `${String(now.entries - previous.entries).padStart(13)}   ${String(now.entries).padStart(11)}`
+            )
+            previous = now
+        }
+
+        emptyHome()
+        const finalRestore = await elapsed(async () => cache().restore(new CacheListener()))
+        const after = new Set(inventory(gradleUserHome).filter((name: string) => !ACTION_WRITTEN.test(name)))
+        const missing = [...before, ...added].filter(name => !after.has(name))
+        console.log(
+            `\nfinal restore ${finalRestore.toFixed(0)} ms, ` +
+                `${missing.length === 0 ? 'everything restored' : `MISSING ${missing.length} paths`}`
+        )
+    }
+
     // The job a workflow actually runs most of the time: the cache is warm, and the build added a little.
     // A cold save then a restore then a second save, which is the one that matters.
     if (scenario === 'incremental') {
-        console.log(
-            'configuration                    ' +
-                'second save   uploaded   restore after   entries   verified'
-        )
+        console.log('configuration                    ' + 'second save   uploaded   restore after   entries   verified')
         const configurations: [string, Record<string, string>][] = [
             ['as shipped', {}],
             ['layers off', {GRADLE_ACTIONS_CACHE_LAYERS: 'false'}],
             ['index off', {GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE: 'false'}],
-            ['layers and index off (v5 shape)', {
-                GRADLE_ACTIONS_CACHE_LAYERS: 'false',
-                GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE: 'false'
-            }]
+            [
+                'layers and index off (v5 shape)',
+                {
+                    GRADLE_ACTIONS_CACHE_LAYERS: 'false',
+                    GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE: 'false'
+                }
+            ]
         ]
 
         for (const [label, env] of configurations) {

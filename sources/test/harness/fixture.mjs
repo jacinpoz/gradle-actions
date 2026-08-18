@@ -145,12 +145,12 @@ export function totalBytes(root) {
  * Adds content as a build would: new transform directories and new dependency artifacts, named by hashes
  * that no existing entry uses. Returns their paths relative to the root.
  */
-export function mutate(root, counts) {
+export function mutate(root, counts, seed = '') {
     const added = []
     const record = full => added.push(path.relative(root, full))
 
     for (let i = 0; i < (counts.transforms ?? 0); i++) {
-        const dir = path.join(root, 'caches/9.6.1/transforms', hashName(`added-transform-${i}`))
+        const dir = path.join(root, 'caches/9.6.1/transforms', hashName(`added-transform-${seed}-${i}`))
         fs.mkdirSync(path.join(dir, 'transformed'), {recursive: true})
         fs.writeFileSync(path.join(dir, 'metadata.bin'), Buffer.alloc(512, i % 251))
         fs.writeFileSync(path.join(dir, 'transformed', 'classes.txt'), `added ${i}\n`.repeat(20))
@@ -166,12 +166,12 @@ export function mutate(root, counts) {
             root,
             'caches/modules-2/files-2.1',
             'org.example.added',
-            `added-${i}`,
+            `added-${seed}-${i}`,
             '2.0.0',
-            hashName(`added-dependency-${i}`, 40)
+            hashName(`added-dependency-${seed}-${i}`, 40)
         )
         fs.mkdirSync(dir, {recursive: true})
-        const target = path.join(dir, `added-${i}-2.0.0.jar`)
+        const target = path.join(dir, `added-${seed}-${i}-2.0.0.jar`)
         if (jars.length > 0) fs.copyFileSync(jars[i % jars.length], target)
         else fs.writeFileSync(target, crypto.randomBytes(256 * 1024))
         record(path.dirname(path.dirname(path.dirname(dir))))
