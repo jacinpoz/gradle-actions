@@ -36,10 +36,31 @@ cache entry was saved or restored. Upstream's integration tests for those entrie
 from the action alone; it is fixed by a patch.
 
 **Caching performance.** Cache entry patterns are resolved by reading only the directories a pattern can
-match, rather than walking the tree beneath its search root and filtering, and that resolver is also
-supplied to `@actions/cache` so the work is not repeated when the archive is built. Large bundle entries
+match, rather than walking the tree beneath its search root and filtering, and the matched paths are then
+handed to `@actions/cache` so that the work is not repeated when the archive is built. Large bundle entries
 are sharded 16 ways on the trailing character of Gradle's content hash, so one changed artifact
 invalidates one shard rather than the whole bundle, and shards transfer concurrently.
+
+**Cache entries are saved incrementally.** Upstream re-saves a whole entry whenever any of its content
+changes, so a job that resolves one new dependency re-uploads a sixteenth of every dependency it has. Here
+each entry is a base plus up to three layers, and a job saves only what the build added: measured against a
+warm cache, a job adding 400 artifact transforms and 20 dependencies uploaded 5 MB instead of 198 MB. New
+content is recognised by its modification time, because `tar` restores the time recorded in the archive, so
+nothing about the restored content has to be stored to compare against. A chain is collapsed back into one
+entry when it is full, or when cache cleanup has pruned much of what it restored.
+
+**The local build cache is cached separately.** `caches/build-cache-1` is named by content hash like the
+other large directories, but upstream leaves it inside the main Gradle User Home entry, which is keyed on
+the commit and so is re-uploaded in full on every run.
+
+**Restore no longer queues behind the largest entry.** The metadata naming the extracted entries used to be
+stored inside the main entry, so nothing else could start until it had finished downloading. It is now a
+small entry of its own, restored first, after which everything transfers at once.
+
+**Entries are transferred a few at a time.** Upstream starts every entry at once, which on a four-core
+runner means around fifty `tar` processes each running a multi-threaded compressor. Measured against a
+local cache service with a shared bandwidth limit, saving 66 entries took 3051 ms unbounded against 2693 ms
+eight at a time.
 
 **Action startup.** Source maps are no longer committed (nothing reads them at runtime), and `cheerio`
 was replaced by a pattern match for the one directory-index scrape that used it.
@@ -51,11 +72,19 @@ was replaced by a pattern match for the one directory-index scrape that used it.
 | `setup-gradle` bundle | 4.7 MB | 1.8 MB |
 | Cache key for the `transforms` entry | ~9.5 s | 142 ms |
 | Path resolution when saving that entry | crashed | 1.3 s |
+| Uploaded by a job that added a little | 198 MB | 5 MB |
+| Time to save it | 2206 ms | 580 ms |
+| Saving 66 entries | 3051 ms | 2693 ms |
 | Extracted-entry caching on Windows | broken | working |
 
-The timings are measured against a Gradle User Home with ~178k transform directories. A small cache
-will not see them: their value there is that the failure modes above no longer apply, not that every
-job gets faster. The download and bundle reductions apply to every job unconditionally.
+The first four rows are measured against a Gradle User Home with ~178k transform directories. A small cache
+will not see them: their value there is that the failure modes above no longer apply, not that every job
+gets faster. The download and bundle reductions apply to every job unconditionally.
+
+The incremental-save and entry-count rows come from `sources/test/harness`, which runs the action against a
+local stand-in for the GitHub Actions cache service with a shared bandwidth limit, and verifies that the
+Gradle User Home after restoring holds everything it held before saving. Every measurement in this file was
+taken on Linux.
 
 ## Using it
 

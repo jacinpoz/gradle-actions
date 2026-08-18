@@ -264,7 +264,7 @@ In the end, we opted to save and restore as much content as is practical, includ
 - `caches/modules-2`: The downloaded dependencies
 - `caches/transforms-3`: The results of artifact transforms
 - `caches/jars-9`: Jar files that have been processed/instrumented by Gradle
-- `caches/build-cache-1`: The local build cache
+- `caches/build-cache-1`: The local build cache. This is extracted and cached independently, as described in [Deduplication of Gradle User Home cache entries](#deduplication-of-gradle-user-home-cache-entries).
 
 In certain cases, a particular section of Gradle User Home will be too large to make caching effective. In these cases, particular subdirectories can be excluded from caching. See [Exclude content from Gradle User Home cache](#exclude-content-from-gradle-user-home-cache).
 
@@ -315,8 +315,32 @@ Artifacts that are cached independently include:
 - Downloaded wrapper distributions
 - Generated Gradle API jars
 - Downloaded Java Toolchains
+- Artifact transform results
+- Compiled Kotlin and Groovy DSL build scripts
+- The local build cache
 
 For example, this means that all jobs executing a particular version of the Gradle wrapper will share a single common entry for this wrapper distribution and one for each of the generated Gradle API jars.
+
+If you do not want the local build cache saved at all -- because you have a remote build cache, for instance -- exclude it as described in [Exclude content from Gradle User Home cache](#exclude-content-from-gradle-user-home-cache):
+
+```yaml
+gradle-home-cache-excludes: |
+    caches/build-cache-1
+```
+
+#### Sharded and incremental entries
+
+The largest of these -- dependencies, artifact transforms, compiled build scripts and the local build cache -- are named by content hash, so each one always belongs to the same shard no matter what else changes around it. Those entries are split across 16 cache entries on the last character of that hash, once there is enough content for it to be worth doing. A single new dependency then invalidates one shard instead of the whole set, and the shards transfer at the same time as each other.
+
+Each of those entries is also saved incrementally. When the content of an entry has grown since it was restored, only what the build added is saved, as a further cache entry layered on top of the one that was restored. A job that pulls in one new dependency therefore uploads that dependency, rather than a sixteenth of every dependency it has. A chain is collapsed back into a single entry once it is four layers long, or when the content it restored has been substantially pruned by [cache cleanup](#configuring-cache-cleanup), which a layer cannot express.
+
+To turn this off and save each entry in full every time, set `GRADLE_ACTIONS_CACHE_LAYERS` to `false` in the environment.
+
+#### Restore order
+
+The metadata naming these entries is itself saved as a small cache entry, which is restored first. Everything else -- the Gradle User Home entry and every extracted entry -- then transfers at the same time, rather than waiting for the largest entry in the cache to arrive before the others can start. Set `GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE` to `false` to restore them one after the other instead.
+
+Cache entries are restored and saved a few at a time rather than all at once, since each one runs its own `tar` and compressor: `GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY` sets how many.
 
 ### Stopping the Gradle daemon
 
@@ -338,7 +362,7 @@ At the end of a Job, The `setup-gradle` action will write a summary of the Gradl
 
 Consider a workflow that first runs a Job "compile-and-unit-test" to compile the code and run some basic unit tests, which is followed by a matrix of parallel "integration-test" jobs that each run a set of integration tests for the repository. Each "integration test" Job requires all of the dependencies required by "compile-and-unit-test", and possibly one or 2 additional dependencies.
 
-By default, a new cache entry will be written on completion of each integration test job. If no additional dependencies were downloaded then this cache entry will share the "dependencies" entry with the "compile-and-unit-test" job, but if a single dependency was downloaded then an entirely new "dependencies" entry would be written. (The `setup-gradle` action does not _yet_ support a layered cache that could do this more efficiently). If each of these "integration-test" entries with their different "dependencies" entries is too large, then it could result in other important entries being evicted from the GitHub Actions cache.
+By default, a new cache entry will be written on completion of each integration test job. If no additional dependencies were downloaded then this cache entry will share the "dependencies" entries with the "compile-and-unit-test" job. If additional dependencies were downloaded, only those are written, as a layer on top of the entries that were restored, so the extra cost is proportional to what the job actually added rather than to the size of the shard it belongs to. Each "integration-test" job still writes its own Gradle User Home entry, and if those are large they could result in other important entries being evicted from the GitHub Actions cache.
 
 Some techniques can be used to avoid/mitigate this issue:
 - Configure the "integration-test" jobs with `cache-read-only: true`, meaning that the Job will use the entry written by the "compile-and-unit-test" job. This will avoid the overhead of cache entries for each of these jobs, at the expense of re-downloading any additional dependencies required by "integration-test".
@@ -422,6 +446,9 @@ org.gradle.logging.stacktrace=internal
 
 A report of all cache entries restored and saved is printed to the Job Summary when saving the cache entries.
 This report can provide valuable insight into how much cache space is being used.
+It also reports the time spent in the work the action does itself -- resolving the cache entry patterns,
+hashing cache keys, identifying new content and deleting extracted content from the Gradle User Home --
+which is separate from the time spent transferring the entries.
 
 When debug logging is enabled, more detailed logging of cache operations is included in the GitHub actions log.
 This includes a breakdown of the contents of the Gradle User Home directory, which may assist in cache optimization.

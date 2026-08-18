@@ -1,0 +1,101 @@
+# Measures the caching work, rather than asserting anything about it.
+#
+# Three jobs in sequence against one cache scope: a cold seed that has nothing to restore and writes every
+# entry, a warm run that changes nothing, and a warm run that pulls in extra dependencies so that the
+# extracted entries have something new to save. Each prints the caching report, which carries the per-entry
+# transfer sizes and times and the totals for the phases the action runs itself.
+#
+# Run it by hand from the Actions tab, before and after a change, and compare the reports. It is not part of
+# 'suite-integ-test-caching.yml': it asserts nothing, and it deliberately writes a lot of cache entries.
+name: Measure caching performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache-key-prefix:
+        description: 'Cache scope to use. Change it to start from a cold cache.'
+        type: string
+        default: 'perf-0'
+      entry-concurrency:
+        description: 'How many cache entries to transfer at once. Empty for the default.'
+        type: string
+        default: ''
+      layers:
+        description: 'Save entries incrementally as layers.'
+        type: boolean
+        default: true
+      parallel-restore:
+        description: 'Restore the entry index first, so everything transfers at once.'
+        type: boolean
+        default: true
+
+env:
+  GRADLE_BUILD_ACTION_CACHE_KEY_PREFIX: caching-perf-${{ inputs.cache-key-prefix }}
+  GRADLE_BUILD_ACTION_CACHE_KEY_JOB: caching-perf
+  GRADLE_ACTIONS_CACHE_ENTRY_CONCURRENCY: ${{ inputs.entry-concurrency }}
+  GRADLE_ACTIONS_CACHE_LAYERS: ${{ inputs.layers }}
+  GRADLE_ACTIONS_CACHE_PARALLEL_RESTORE: ${{ inputs.parallel-restore }}
+
+permissions:
+  contents: read
+
+jobs:
+  cold-seed:
+    name: Cold cache, writes every entry
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false # Writing on a non-default branch is the point of this workflow
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test
+    - name: Report Gradle User Home size
+      run: du -sh ~/.gradle ~/.gradle/caches/* | sort -h
+
+  unchanged:
+    name: Warm cache, nothing changed
+    needs: cold-seed
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test
+
+  incremental:
+    name: Warm cache, new dependencies to save
+    needs: unchanged
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Initialize integ-test
+      uses: ./.github/actions/init-integ-test
+
+    - name: Setup Gradle
+      uses: ./setup-gradle
+      with:
+        cache-read-only: false
+    - name: Build using Gradle wrapper
+      working-directory: .github/workflow-samples/groovy-dsl
+      run: ./gradlew test
+    # A second sample resolves and transforms artifacts the first one did not, so the extracted entries
+    # have new content to save without everything else changing: what a layer is for.
+    - name: Build a second sample, to add content to the extracted entries
+      working-directory: .github/workflow-samples/kotlin-dsl
+      run: ./gradlew test
