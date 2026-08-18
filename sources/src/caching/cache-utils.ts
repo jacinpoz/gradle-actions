@@ -78,7 +78,12 @@ export async function saveCache(cachePath: string[], cacheKey: string, listener:
         listener.markSaved(savedEntry.key, savedEntry.size, saveTime)
         core.info(`Saved cache entry with key ${cacheKey} from ${cachePath.join()} in ${saveTime}ms`)
     } catch (error) {
-        if (error instanceof cache.ReserveCacheError) {
+        if (error instanceof cache.CacheWriteDeniedError) {
+            // The cache token issued for this run is read-only, which the service does for an untrusted
+            // event such as a pull request from a fork. This must be tested before ReserveCacheError,
+            // which it extends, or a denied write is reported as an entry that already exists.
+            listener.markNotSaved('cache write denied for this run')
+        } else if (error instanceof cache.ReserveCacheError) {
             listener.markAlreadyExists(cacheKey)
         } else {
             listener.markNotSaved((error as Error).message)
