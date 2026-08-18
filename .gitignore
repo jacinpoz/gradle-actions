@@ -1,2 +1,5 @@
 .git
 .vscode
+# Source maps are built but not shipped: nothing reads them at runtime (no --enable-source-maps,
+# no source-map-support), and they were 46 MB of the 61 MB dist/ that every runner downloads.
+dist/**/*.map

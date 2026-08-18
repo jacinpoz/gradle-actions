@@ -1,6 +1,6 @@
 import * as checksums from '../../../src/wrapper-validation/checksums'
 import nock from 'nock'
-import {afterEach, describe, expect, test, jest} from '@jest/globals'
+import {afterEach, describe, expect, it, test, jest} from '@jest/globals'
 
 jest.setTimeout(60000)
 
@@ -75,4 +75,65 @@ describe('retry', () => {
       nock.isDone()
     })
   })
+})
+
+// Markup captured verbatim from https://services.gradle.org/distributions-snapshots/. The links are
+// matched by pattern rather than by parsing the document, so the test pins that against the real page
+// shape: a breadcrumb whose links must not match, a '.jar.sha256' that must, and sibling '.jar.asc'
+// and '.zip' entries for the same version that must not.
+const SNAPSHOT_INDEX_PAGE = `
+<div class="breadcrumb">
+        <ul>
+        <li><a href="/"> services.gradle.org</a>/</li><li><a href="/distributions-snapshots"> distributions-snaphosts</a>/</li>
+        </ul>
+    </div>
+    <ul class="items">
+        <li>
+            <a href="/distributions-snapshots/gradle-9.7.1-20260814014720+0000-wrapper.jar.sha256"><img src="/images/file.gif">
+                <span class="name">gradle-9.7.1-20260814014720+0000-wrapper.jar.sha256</span>
+            </a>
+        </li>
+        <li>
+            <a href="/distributions-snapshots/gradle-9.7.1-20260814014720+0000-wrapper.jar.asc"><img src="/images/file.gif">
+                <span class="name">gradle-9.7.1-20260814014720+0000-wrapper.jar.asc</span>
+            </a>
+        </li>
+        <li>
+            <a href="/distributions-snapshots/gradle-9.8.0-20260814002830+0000-wrapper.jar.sha256"><img src="/images/file.gif">
+                <span class="name">gradle-9.8.0-20260814002830+0000-wrapper.jar.sha256</span>
+            </a>
+        </li>
+        <li>
+            <a href="/distributions-snapshots/gradle-9.7.1-20260814014720+0000-docs.zip"><img src="/images/file.gif">
+                <span class="name">gradle-9.7.1-20260814014720+0000-docs.zip</span>
+            </a>
+        </li>
+    </ul>`
+
+describe('parseSnapshotChecksumUrls', () => {
+    it('finds every wrapper checksum link and nothing else', () => {
+        expect(checksums.parseSnapshotChecksumUrls(SNAPSHOT_INDEX_PAGE)).toEqual([
+            [
+                '9.7.1-20260814014720+0000',
+                'https://services.gradle.org/distributions-snapshots/gradle-9.7.1-20260814014720+0000-wrapper.jar.sha256'
+            ],
+            [
+                '9.8.0-20260814002830+0000',
+                'https://services.gradle.org/distributions-snapshots/gradle-9.8.0-20260814002830+0000-wrapper.jar.sha256'
+            ]
+        ])
+    })
+
+    it('finds nothing in a page with no wrapper checksums', () => {
+        expect(checksums.parseSnapshotChecksumUrls('<ul><li><a href="/distributions-snapshots/gradle-9.7.1-bin.zip">x</a></li></ul>')).toEqual(
+            []
+        )
+    })
+
+    it('does not match a checksum link for something other than the wrapper jar', () => {
+        // '-bin.zip.sha256' ends in .sha256 but is not a wrapper jar, and must not be collected.
+        expect(
+            checksums.parseSnapshotChecksumUrls('<a href="/distributions-snapshots/gradle-9.7.1-bin.zip.sha256">x</a>')
+        ).toEqual([])
+    })
 })
