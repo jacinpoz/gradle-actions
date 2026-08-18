@@ -48,7 +48,10 @@ jobs:
       skip-dist: ${{ inputs.skip-dist }}
 
   develocity-injection:
-    if: ${{ ! github.event.pull_request.head.repo.fork }}
+    # Only upstream can run these: they inject a Develocity plugin pointed at Gradle's own server,
+    # ge.solutions-team.gradle.com, and authenticate to it with a key no other repository has. Without
+    # it every job in the suite fails, which buries the result of every suite that can run here.
+    if: ${{ github.repository == 'gradle/actions' && ! github.event.pull_request.head.repo.fork }}
     uses: ./.github/workflows/integ-test-inject-develocity.yml
     with:
       skip-dist: ${{ inputs.skip-dist }}

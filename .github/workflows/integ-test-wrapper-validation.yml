@@ -32,6 +32,12 @@ jobs:
     - name: Run wrapper-validation-action
       id: setup-gradle
       uses: ./setup-gradle
+      with:
+        # This job asserts that validation FAILS for the wrapper jars in this repository. Restoring the
+        # Gradle User Home would defeat it: '.setup-gradle/valid-wrappers.json' carries the checksums a
+        # previous job already validated, and a wrapper listed there is not checked again, so validation
+        # passes and the assertion below never fires.
+        cache-disabled: true
       env:
         ALLOWED_GRADLE_WRAPPER_CHECKSUMS: ''
       continue-on-error: true
