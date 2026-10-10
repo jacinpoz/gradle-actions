@@ -84,6 +84,12 @@ export class CacheCleaner {
             readResourceFileAsString('init-scripts', 'gradle-actions.cache-cleanup.init.gradle')
         )
         fs.writeFileSync(path.resolve(cleanupProjectDir, 'build.gradle'), 'task("noop") {}')
+        // As project properties, which every setting of the workflow's own outranks: a Gradle User Home or
+        // command line asking for a larger heap still gets it, and the cleanup then forks as it always did.
+        fs.writeFileSync(
+            path.resolve(cleanupProjectDir, 'gradle.properties'),
+            `org.gradle.jvmargs=${CLEANUP_JVM_ARGS.join(' ')}\n`
+        )
 
         await core.group('Executing Gradle to clean up caches', async () => {
             core.info(`Cleaning up caches last used before ${cleanTimestamp}`)
@@ -111,29 +117,13 @@ export class CacheCleaner {
             'noop'
         ]
 
-        // A Gradle User Home that sets its own JVM arguments -- a larger heap for a large cache, say -- keeps
-        // them, and the cleanup forks a daemon to honour them as it always did.
-        if (this.gradleUserHomeSetsJvmArgs()) {
-            await exec.exec(executable, args, {cwd: cleanupProjectDir})
-            return
-        }
-
         // Appended to the job's own GRADLE_OPTS -- a proxy, say -- and later than the launcher script's heap
         // settings, which these then take precedence over.
         const gradleOpts = [process.env['GRADLE_OPTS'], ...CLEANUP_JVM_ARGS].filter(Boolean).join(' ')
-        await exec.exec(executable, [`-Dorg.gradle.jvmargs=${CLEANUP_JVM_ARGS.join(' ')}`, ...args], {
+        await exec.exec(executable, args, {
             cwd: cleanupProjectDir,
             env: {...process.env, GRADLE_OPTS: gradleOpts} as {[key: string]: string}
         })
-    }
-
-    private gradleUserHomeSetsJvmArgs(): boolean {
-        try {
-            const properties = fs.readFileSync(path.resolve(this.gradleUserHome, 'gradle.properties'), 'utf-8')
-            return /^\s*org\.gradle\.jvmargs\s*[=:]/m.test(properties)
-        } catch {
-            return false
-        }
     }
 }
 

@@ -272,7 +272,7 @@ function shardCountOverride(): number | undefined {
  *
  * The path count moves on every run, and a different shard count gives every shard a different key, so
  * crossing a boundary saves the whole bundle afresh rather than as a layer. The previous count is therefore
- * kept for as long as it leaves each shard between 1024 and 8192 paths, so that a bundle hovering around a
+ * kept for as long as it leaves each shard between 2048 and 8192 paths, so that a bundle hovering around a
  * boundary does not re-save itself on every run.
  */
 export function shardCountFor(
@@ -292,7 +292,7 @@ export function shardCountFor(
     const keepPrevious =
         previousCount !== undefined &&
         matchedPathCount / previousCount <= MAX_SHARD_PATHS * 2 &&
-        (previousCount === 1 || matchedPathCount / previousCount >= MAX_SHARD_PATHS / 4)
+        (previousCount === 1 || matchedPathCount / previousCount >= MAX_SHARD_PATHS / 2)
     return Math.max(forSize, keepPrevious ? previousCount : forPaths)
 }
 
@@ -560,13 +560,11 @@ abstract class AbstractEntryExtractor {
         // the layers beneath a missing one still make for a mostly warm Gradle User Home.
         let missingIndex = layers.length
         let earlierLayersDone: Promise<unknown> = Promise.resolve()
-        const layersDone: Promise<void>[] = []
 
         const actions = layers.map((layerKey, index) => {
             const waitFor = earlierLayersDone
             let markDone = (): void => {}
             const done = new Promise<void>(resolve => (markDone = resolve))
-            layersDone.push(done)
             earlierLayersDone = Promise.all([waitFor, done])
 
             return async (): Promise<void> => {
@@ -594,7 +592,7 @@ abstract class AbstractEntryExtractor {
             }
         })
 
-        const outcome = Promise.all(layersDone).then(() => {
+        const outcome = earlierLayersDone.then(() => {
             if (missingIndex < layers.length) {
                 core.info(`Did not restore ${artifactType} with key ${layers[missingIndex]} to ${pattern}`)
                 return new ExtractedCacheEntry(artifactType, pattern, undefined)

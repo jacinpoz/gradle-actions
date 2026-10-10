@@ -20,7 +20,7 @@ A shard now holds at most 4096 matched paths. Extracting 12,000 transform direct
 were no faster than four. A real Gradle User Home holding ~186k transform directories is split sixteen ways.
 
 The path count moves on every run, and a new shard count saves the bundle afresh rather than as a layer,
-so the previous count is kept while it leaves each shard between 1024 and 8192 paths.
+so the previous count is kept while it leaves each shard between 2048 and 8192 paths.
 
 ### Every layer of a chain downloads at once
 
@@ -43,9 +43,10 @@ nearly every job. Two things made it slower than it needed to be:
   now passed as a system property, and the compiled script is cached in the Gradle User Home: 4140 ms to
   3644 ms.
 
-Measured with Gradle 8.14 on Linux. A Gradle User Home whose `gradle.properties` sets
-`org.gradle.jvmargs` keeps those arguments, and its cleanup forks as before; so does one whose
-`GRADLE_OPTS`, `JAVA_OPTS` or `org.gradle.java.home` makes the launcher incompatible.
+Measured with Gradle 8.14 on Linux. The arguments are set as the cleanup project's own properties, so an
+`org.gradle.jvmargs` the workflow sets anywhere else -- a larger heap for a large cache, say -- still wins,
+and that cleanup forks as before; so does one whose `GRADLE_OPTS`, `JAVA_OPTS` or `org.gradle.java.home`
+makes the launcher incompatible.
 
 ### What this costs once
 

@@ -47,15 +47,20 @@ describe('shardCountFor', () => {
         it('stopping at sixteen', () => {
             expect(shardCountFor(30 * 1024 * 1024, 185685)).toBe(16)
         })
-        it('keeping the previous count while it is within a factor of two', () => {
-            // 12,000 paths call for 4; 2 and 8 are close enough to keep, 1 and 16 are not.
+        it('keeping the previous count while each shard holds 2048 to 8192 paths', () => {
+            // 12,000 paths call for 4; 2 leaves shards close enough to keep, and 1, 8 and 16 do not.
             expect(shardCountFor(0, 12000, 2)).toBe(2)
-            expect(shardCountFor(0, 12000, 8)).toBe(8)
+            expect(shardCountFor(0, 12000, 8)).toBe(4)
+            expect(shardCountFor(0, 20000, 16)).toBe(8)
             expect(shardCountFor(0, 12000, 1)).toBe(4)
             expect(shardCountFor(0, 12000, 16)).toBe(4)
             // Hovering either side of a boundary does not move it.
             expect(shardCountFor(0, 4097, 1)).toBe(1)
-            expect(shardCountFor(0, 4095, 2)).toBe(2)
+            expect(shardCountFor(0, 4500, 2)).toBe(2)
+            // Shrinking below 2048 a shard drops to one, which is then kept until 8192 paths.
+            expect(shardCountFor(0, 4095, 2)).toBe(1)
+            expect(shardCountFor(0, 8192, 1)).toBe(1)
+            expect(shardCountFor(0, 8193, 1)).toBe(4)
         })
         it('dropping a previous count that leaves shards too small, whatever set it', () => {
             // Split in two when it was large; now 50 paths and well under a gigabyte.
