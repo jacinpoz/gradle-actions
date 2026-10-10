@@ -36,9 +36,21 @@ jest.unstable_mockModule('@actions/cache', () => ({
         saved.push({key, files})
         return {key, size: files.length}
     },
-    restoreCache: async (_patterns: string[], key: string) => {
+    restoreCache: async (
+        _patterns: string[],
+        key: string,
+        _restoreKeys: string[],
+        options?: {beforeExtract?: () => Promise<boolean | void>}
+    ) => {
         const archived = archives.get(key)
         if (!archived) {
+            return undefined
+        }
+        // Earlier layers take longer to "download", so that layers finish downloading in reverse order and
+        // only the action's own ordering of the extraction can make the later layer's copy win.
+        const layerIndex = [...archives.keys()].indexOf(key)
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, 40 - 10 * layerIndex)))
+        if ((await options?.beforeExtract?.()) === false) {
             return undefined
         }
         for (const {file, mtimeMs} of archived) {
@@ -161,6 +173,57 @@ describe('an extracted entry over successive jobs', () => {
 
         await extractor().restore(new CacheListener())
         expect(transformsPresent()).toEqual([...INITIAL, '9f8e7d6c'].sort())
+    })
+
+    // Every layer downloads at once, so only the order of extraction makes a later layer's copy of a path win.
+    // The stand-in cache finishes downloading later layers first, which is the order that would get it wrong.
+    it('extracts the layers in order, however their downloads finish', async () => {
+        const many = [...INITIAL, '5a6b7c8d', '6a7b8c9d', '7a8b9cad', '8a9bacbd']
+        addTransforms(many, {aged: true})
+        await extractor().extract(new CacheListener())
+        await extractor().restore(new CacheListener())
+
+        // The build rewrites one restored directory and adds another, so both are saved in the layer.
+        const rewritten = path.join(gradleUserHome, 'caches/transforms-4', many[0])
+        fs.utimesSync(rewritten, new Date(), new Date())
+        addTransforms(['9f8e7d6c'])
+        await extractor().extract(new CacheListener())
+        const layers = transformsEntry().layers!
+        expect(layers).toHaveLength(2)
+
+        await extractor().restore(new CacheListener())
+        expect(fs.readFileSync(path.join(rewritten, 'marker'), 'utf-8')).toBe(layers[1])
+    })
+
+    // The base is what every layer builds on, so once it is gone nothing after it is worth extracting.
+    it('extracts nothing from a chain whose base is missing', async () => {
+        addTransforms(INITIAL, {aged: true})
+        await extractor().extract(new CacheListener())
+        await extractor().restore(new CacheListener())
+        addTransforms(['9f8e7d6c'])
+        await extractor().extract(new CacheListener())
+        const layers = transformsEntry().layers!
+        expect(layers).toHaveLength(2)
+
+        archives.delete(layers[0])
+        await extractor().restore(new CacheListener())
+        expect(transformsPresent()).toEqual([])
+        expect(metadata().entries.find(x => x.artifactType === 'transforms')?.layers).toBeUndefined()
+    })
+
+    // A missing layer makes the chain incomplete, but what lies beneath it is still worth having.
+    it('still extracts the layers beneath a missing one', async () => {
+        addTransforms(INITIAL, {aged: true})
+        await extractor().extract(new CacheListener())
+        await extractor().restore(new CacheListener())
+        addTransforms(['9f8e7d6c'])
+        await extractor().extract(new CacheListener())
+        const layers = transformsEntry().layers!
+        expect(layers).toHaveLength(2)
+
+        archives.delete(layers[1])
+        await extractor().restore(new CacheListener())
+        expect(transformsPresent()).toEqual([...INITIAL].sort())
     })
 
     it('saves nothing at all when the content has not changed', async () => {

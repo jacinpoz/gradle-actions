@@ -179,6 +179,20 @@ async function main(): Promise<void> {
         )
     }
 
+    // The same restore, repeated. Nothing about the work changes between rounds, so a restore time that
+    // drifts measures the machine rather than the action -- worth knowing before reading the other scenarios.
+    if (scenario === 'repeat') {
+        const rounds = Number(flag('rounds', '5'))
+        await resetServer()
+        freshHome()
+        await cache().save(new CacheListener())
+        for (let round = 1; round <= rounds; round++) {
+            emptyHome()
+            const restoreMs = await elapsed(async () => cache().restore(new CacheListener()))
+            console.log(`repeat ${round}   restore ${restoreMs.toFixed(0)} ms`)
+        }
+    }
+
     // The job a workflow actually runs most of the time: the cache is warm, and the build added a little.
     // A cold save then a restore then a second save, which is the one that matters.
     if (scenario === 'incremental') {

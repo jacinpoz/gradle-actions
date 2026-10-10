@@ -2,6 +2,7 @@ import {describe, expect, it} from '@jest/globals'
 
 import {
     bundleSizeBytes,
+    previousShardCount,
     shardArtifactType,
     shardCountFor,
     shardIndexForPath,
@@ -17,21 +18,61 @@ describe('shardCountFor', () => {
     // keep one entry from growing unwieldy.
     describe('decides from the size the bundle reached last time', () => {
         it('leaving a bundle whole while it fits in one entry', () => {
-            expect(shardCountFor(0, 100000)).toBe(1)
-            expect(shardCountFor(GIB, 100000)).toBe(1)
+            expect(shardCountFor(0, 4096)).toBe(1)
+            expect(shardCountFor(GIB, 4096)).toBe(1)
         })
         it('splitting it just enough as it grows', () => {
-            expect(shardCountFor(1.5 * GIB, 100000)).toBe(2)
-            expect(shardCountFor(3 * GIB, 100000)).toBe(4)
-            expect(shardCountFor(7 * GIB, 100000)).toBe(8)
-            expect(shardCountFor(12 * GIB, 100000)).toBe(16)
+            expect(shardCountFor(1.5 * GIB, 1000)).toBe(2)
+            expect(shardCountFor(3 * GIB, 1000)).toBe(4)
+            expect(shardCountFor(7 * GIB, 1000)).toBe(8)
+            expect(shardCountFor(12 * GIB, 1000)).toBe(16)
         })
         it('stopping at sixteen, however large it gets', () => {
             expect(shardCountFor(50 * GIB, 100000)).toBe(16)
             expect(shardCountFor(500 * GIB, 100000)).toBe(16)
         })
-        it('ignoring the path count once a size is known', () => {
+        it('taking the size alone when the path count is small', () => {
             expect(shardCountFor(4 * GIB, 1)).toBe(4)
+        })
+    })
+
+    // Extraction is one 'tar' creating every path, so a bundle of many small paths is split however few
+    // bytes it holds: 'transforms' is a few megabytes over tens of thousands of directories.
+    describe('splits a bundle of many paths whatever its size', () => {
+        it('just enough to keep each shard to 4096 paths', () => {
+            expect(shardCountFor(0, 4097)).toBe(2)
+            expect(shardCountFor(3 * 1024 * 1024, 12000)).toBe(4)
+            expect(shardCountFor(3 * 1024 * 1024, 32768)).toBe(8)
+        })
+        it('stopping at sixteen', () => {
+            expect(shardCountFor(30 * 1024 * 1024, 185685)).toBe(16)
+        })
+        it('keeping the previous count while each shard holds 2048 to 8192 paths', () => {
+            // 12,000 paths call for 4; 2 leaves shards close enough to keep, and 1, 8 and 16 do not.
+            expect(shardCountFor(0, 12000, 2)).toBe(2)
+            expect(shardCountFor(0, 12000, 8)).toBe(4)
+            expect(shardCountFor(0, 20000, 16)).toBe(8)
+            expect(shardCountFor(0, 12000, 1)).toBe(4)
+            expect(shardCountFor(0, 12000, 16)).toBe(4)
+            // Hovering either side of a boundary does not move it.
+            expect(shardCountFor(0, 4097, 1)).toBe(1)
+            expect(shardCountFor(0, 4500, 2)).toBe(2)
+            // Shrinking below 2048 a shard drops to one, which is then kept until 8192 paths.
+            expect(shardCountFor(0, 4095, 2)).toBe(1)
+            expect(shardCountFor(0, 8192, 1)).toBe(1)
+            expect(shardCountFor(0, 8193, 1)).toBe(4)
+        })
+        it('dropping a previous count that leaves shards too small, whatever set it', () => {
+            // Split in two when it was large; now 50 paths and well under a gigabyte.
+            expect(shardCountFor(200 * 1024 * 1024, 50, 2)).toBe(1)
+        })
+        it('never keeping a previous count that the size has outgrown', () => {
+            expect(shardCountFor(7 * GIB, 12000, 2)).toBe(8)
+        })
+        it('taking whichever of size and paths needs more', () => {
+            expect(shardCountFor(3 * GIB, 12000)).toBe(4)
+            expect(shardCountFor(7 * GIB, 12000)).toBe(8)
+            expect(shardCountFor(GIB, 20000)).toBe(8)
         })
     })
 
@@ -156,5 +197,27 @@ describe('bundleSizeBytes', () => {
     it('is unknown when any shard has no recorded size', () => {
         const entries = [entry('transforms-4-0', 'transforms', 100), entry('transforms-4-1', 'transforms', undefined)]
         expect(bundleSizeBytes(entries, 'transforms')).toBeUndefined()
+    })
+})
+
+describe('previousShardCount', () => {
+    const entry = (artifactType: string, bundle?: string): never =>
+        ({artifactType, pattern: '', cacheKey: 'k', layers: undefined, pathCount: 1, bundle}) as never
+
+    it('reads the count from the name a shard was saved under', () => {
+        expect(
+            previousShardCount(
+                [entry('transforms-4-0', 'transforms'), entry('transforms-4-3', 'transforms')],
+                'transforms'
+            )
+        ).toBe(4)
+        expect(previousShardCount([entry('kotlin-dsl-16-2', 'kotlin-dsl')], 'kotlin-dsl')).toBe(16)
+    })
+    it('is one for a bundle saved whole', () => {
+        expect(previousShardCount([entry('transforms')], 'transforms')).toBe(1)
+    })
+    it('is undefined for a bundle that was not saved', () => {
+        expect(previousShardCount([entry('dependencies-4-0', 'dependencies')], 'transforms')).toBeUndefined()
+        expect(previousShardCount([], 'transforms')).toBeUndefined()
     })
 })

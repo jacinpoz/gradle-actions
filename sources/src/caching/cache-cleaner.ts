@@ -7,6 +7,7 @@ import * as provisioner from '../execution/provision'
 import {BuildResult, BuildResults} from '../build-results'
 import {versionIsAtLeast} from '../execution/gradle'
 import {gradleWrapperScript} from '../execution/gradlew'
+import {readResourceFileAsString} from './gradle-user-home-utils'
 
 export class CacheCleaner {
     private readonly gradleUserHome: string
@@ -76,38 +77,37 @@ export class CacheCleaner {
             path.resolve(cleanupProjectDir, 'settings.gradle'),
             'rootProject.name = "dummy-cleanup-project"'
         )
+        // The same text on every run, with the time passed in as a property, so that the compiled script is
+        // cached. Writing the time into the script made every run compile it afresh, which measured ~500 ms.
         fs.writeFileSync(
             path.resolve(cleanupProjectDir, 'init.gradle'),
-            `
-            beforeSettings { settings ->
-                def cleanupTime = ${cleanTimestamp}
-            
-                settings.caches {
-                    cleanup = Cleanup.ALWAYS
-            
-                    releasedWrappers.setRemoveUnusedEntriesOlderThan(cleanupTime)
-                    snapshotWrappers.setRemoveUnusedEntriesOlderThan(cleanupTime)
-                    downloadedResources.setRemoveUnusedEntriesOlderThan(cleanupTime)
-                    createdResources.setRemoveUnusedEntriesOlderThan(cleanupTime)
-                    buildCache.setRemoveUnusedEntriesOlderThan(cleanupTime)
-                }
-            }
-            `
+            readResourceFileAsString('init-scripts', 'gradle-actions.cache-cleanup.init.gradle')
         )
         fs.writeFileSync(path.resolve(cleanupProjectDir, 'build.gradle'), 'task("noop") {}')
+        // As project properties, which every setting of the workflow's own outranks: a Gradle User Home or
+        // command line asking for a larger heap still gets it, and the cleanup then forks as it always did.
+        fs.writeFileSync(
+            path.resolve(cleanupProjectDir, 'gradle.properties'),
+            `org.gradle.jvmargs=${CLEANUP_JVM_ARGS.join(' ')}\n`
+        )
 
         await core.group('Executing Gradle to clean up caches', async () => {
             core.info(`Cleaning up caches last used before ${cleanTimestamp}`)
-            await this.executeCleanupBuild(executable, cleanupProjectDir)
+            await this.executeCleanupBuild(executable, cleanupProjectDir, cleanTimestamp)
         })
     }
 
-    private async executeCleanupBuild(executable: string, cleanupProjectDir: string): Promise<void> {
+    private async executeCleanupBuild(
+        executable: string,
+        cleanupProjectDir: string,
+        cleanTimestamp: string
+    ): Promise<void> {
         const args = [
             '-g',
             this.gradleUserHome,
             '-I',
             'init.gradle',
+            `-Dgradle.actions.cleanup.time=${cleanTimestamp}`,
             '--info',
             '--no-daemon',
             '--no-scan',
@@ -117,8 +117,27 @@ export class CacheCleaner {
             'noop'
         ]
 
+        // Appended to the job's own GRADLE_OPTS -- a proxy, say -- and later than the launcher script's heap
+        // settings, which these then take precedence over.
+        const gradleOpts = [process.env['GRADLE_OPTS'], ...CLEANUP_JVM_ARGS].filter(Boolean).join(' ')
         await exec.exec(executable, args, {
-            cwd: cleanupProjectDir
+            cwd: cleanupProjectDir,
+            env: {...process.env, GRADLE_OPTS: gradleOpts} as {[key: string]: string}
         })
     }
 }
+
+/**
+ * The JVM arguments the cleanup build both asks for and is launched with.
+ *
+ * `--no-daemon` does not keep Gradle in one JVM: the launcher starts with `-Xmx64m`, the build asks for
+ * Gradle's default daemon arguments, and the mismatch makes Gradle fork a single-use daemon -- a second JVM
+ * start and Gradle bootstrap, inside the post-action step of every job that cleans up. Giving the launcher
+ * the arguments it is about to request lets the build run where it is: 4181 ms to 3521 ms for the cleanup
+ * build, measured with Gradle 8.14. These were Gradle's default daemon arguments when measured; they need
+ * not track later defaults, since they only have to agree with themselves.
+ *
+ * Anything else that makes the launcher incompatible -- `org.gradle.java.home`, or JVM options of a
+ * workflow's own in `GRADLE_OPTS` or `JAVA_OPTS` -- still forks, exactly as every cleanup did before.
+ */
+const CLEANUP_JVM_ARGS = ['-Xms256m', '-Xmx512m', '-XX:MaxMetaspaceSize=384m', '-XX:+HeapDumpOnOutOfMemoryError']

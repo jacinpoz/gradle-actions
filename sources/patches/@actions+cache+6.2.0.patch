@@ -31,7 +31,7 @@ index b1ec143..883a40f 100644
 +    resolver: ((patterns: string[]) => string[] | undefined) | undefined
 +): void;
 diff --git a/node_modules/@actions/cache/lib/cache.js b/node_modules/@actions/cache/lib/cache.js
-index 63b338a..601732b 100644
+index 63b338a..a6ca6b8 100644
 --- a/node_modules/@actions/cache/lib/cache.js
 +++ b/node_modules/@actions/cache/lib/cache.js
 @@ -195,7 +195,7 @@ function restoreCacheV1(paths_1, primaryKey_1, restoreKeys_1, options_1) {
@@ -43,8 +43,16 @@ index 63b338a..601732b 100644
              }
              archivePath = path.join(yield utils.createTempDirectory(), utils.getCacheFileName(compressionMethod));
              core.debug(`Archive Path: ${archivePath}`);
-@@ -208,27 +208,7 @@ function restoreCacheV1(paths_1, primaryKey_1, restoreKeys_1, options_1) {
+@@ -206,29 +206,15 @@ function restoreCacheV1(paths_1, primaryKey_1, restoreKeys_1, options_1) {
+             }
+             const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
              core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
++            // PATCHED: let the caller hold extraction back, so that downloads can run ahead of it, or
++            // decline it, in which case nothing is extracted and the restore reports a miss.
++            if ((options === null || options === void 0 ? void 0 : options.beforeExtract) &&
++                (yield options.beforeExtract()) === false) {
++                return undefined;
++            }
              yield extractTar(archivePath, compressionMethod);
              core.info('Cache restored successfully');
 -            return cacheEntry.cacheKey;
@@ -72,7 +80,7 @@ index 63b338a..601732b 100644
          }
          finally {
              // Try to delete the archive to save space
-@@ -303,7 +283,7 @@ function restoreCacheV2(paths_1, primaryKey_1, restoreKeys_1, options_1) {
+@@ -303,7 +289,7 @@ function restoreCacheV2(paths_1, primaryKey_1, restoreKeys_1, options_1) {
              }
              if (options === null || options === void 0 ? void 0 : options.lookupOnly) {
                  core.info('Lookup only - skipping download');
@@ -81,8 +89,16 @@ index 63b338a..601732b 100644
              }
              archivePath = path.join(yield utils.createTempDirectory(), utils.getCacheFileName(compressionMethod));
              core.debug(`Archive path: ${archivePath}`);
-@@ -316,27 +296,7 @@ function restoreCacheV2(paths_1, primaryKey_1, restoreKeys_1, options_1) {
+@@ -314,29 +300,15 @@ function restoreCacheV2(paths_1, primaryKey_1, restoreKeys_1, options_1) {
+             if (core.isDebug()) {
+                 yield listTar(archivePath, compressionMethod);
              }
++            // PATCHED: let the caller hold extraction back, so that downloads can run ahead of it, or
++            // decline it, in which case nothing is extracted and the restore reports a miss.
++            if ((options === null || options === void 0 ? void 0 : options.beforeExtract) &&
++                (yield options.beforeExtract()) === false) {
++                return undefined;
++            }
              yield extractTar(archivePath, compressionMethod);
              core.info('Cache restored successfully');
 -            return response.matchedKey;
@@ -110,7 +126,7 @@ index 63b338a..601732b 100644
          }
          finally {
              try {
-@@ -443,29 +403,7 @@ function saveCacheV1(paths_1, key_1, options_1) {
+@@ -443,29 +415,7 @@ function saveCacheV1(paths_1, key_1, options_1) {
              }
              core.debug(`Saving Cache (ID: ${cacheId})`);
              yield cacheHttpClient.saveCache(cacheId, archivePath, '', options);
@@ -141,7 +157,7 @@ index 63b338a..601732b 100644
          }
          finally {
              // Try to delete the archive to save space
-@@ -561,32 +499,7 @@ function saveCacheV2(paths_1, key_1, options_1) {
+@@ -561,32 +511,7 @@ function saveCacheV2(paths_1, key_1, options_1) {
                  throw new Error(`Unable to finalize cache with key ${key}, another job may be finalizing this cache.`);
              }
              cacheId = parseInt(finalizeResponse.entryId);
@@ -175,7 +191,7 @@ index 63b338a..601732b 100644
          }
          finally {
              // Try to delete the archive to save space
-@@ -600,4 +513,12 @@ function saveCacheV2(paths_1, key_1, options_1) {
+@@ -600,4 +525,12 @@ function saveCacheV2(paths_1, key_1, options_1) {
          return cacheId;
      });
  }
@@ -291,3 +307,20 @@ index 5ca63f5..0ee215b 100644
      });
  }
  export function unlinkFile(filePath) {
+diff --git a/node_modules/@actions/cache/lib/options.d.ts b/node_modules/@actions/cache/lib/options.d.ts
+index 6f67cb2..1586242 100644
+--- a/node_modules/@actions/cache/lib/options.d.ts
++++ b/node_modules/@actions/cache/lib/options.d.ts
+@@ -72,6 +72,12 @@ export interface DownloadOptions {
+      * @default false
+      */
+     lookupOnly?: boolean;
++    /**
++     * PATCHED: awaited after the archive has downloaded and before it is extracted, so that several
++     * archives can download at once and still extract in a given order. Resolving to false declines the
++     * extraction, and the restore then returns undefined as for a miss.
++     */
++    beforeExtract?: () => Promise<boolean | void>;
+ }
+ /**
+  * Returns a copy of the upload options with defaults filled in.

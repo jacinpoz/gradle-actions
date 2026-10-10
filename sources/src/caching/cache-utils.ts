@@ -101,18 +101,32 @@ export async function restoreCache(
     cachePath: string[],
     cacheKey: string,
     cacheRestoreKeys: string[],
-    listener: CacheEntryListener
+    listener: CacheEntryListener,
+    beforeExtract?: () => Promise<boolean | void>
 ): Promise<cache.CacheEntry | undefined> {
     listener.markRequested(cacheKey, cacheRestoreKeys)
     try {
         const startTime = Date.now()
         // Only override the read timeout if the SEGMENT_DOWNLOAD_TIMEOUT_MINS env var has NOT been set
-        const cacheRestoreOptions = process.env[SEGMENT_DOWNLOAD_TIMEOUT_VAR]
-            ? {}
-            : {segmentTimeoutInMs: SEGMENT_DOWNLOAD_TIMEOUT_DEFAULT}
+        // Time spent waiting to extract is not time spent restoring, and is left out of what is reported.
+        let waitedMs = 0
+        const cacheRestoreOptions: cache.DownloadOptions = {}
+        if (beforeExtract) {
+            cacheRestoreOptions.beforeExtract = async () => {
+                const waitStart = Date.now()
+                try {
+                    return await beforeExtract()
+                } finally {
+                    waitedMs = Date.now() - waitStart
+                }
+            }
+        }
+        if (!process.env[SEGMENT_DOWNLOAD_TIMEOUT_VAR]) {
+            cacheRestoreOptions.segmentTimeoutInMs = SEGMENT_DOWNLOAD_TIMEOUT_DEFAULT
+        }
         const restoredEntry = await cache.restoreCache(cachePath, cacheKey, cacheRestoreKeys, cacheRestoreOptions)
         if (restoredEntry !== undefined) {
-            const restoreTime = Date.now() - startTime
+            const restoreTime = Date.now() - startTime - waitedMs
             listener.markRestored(restoredEntry.key, restoredEntry.size, restoreTime)
             core.info(`Restored cache entry with key ${cacheKey} to ${cachePath.join()} in ${restoreTime}ms`)
         }
