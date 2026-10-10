@@ -2,6 +2,7 @@ import {describe, expect, it} from '@jest/globals'
 
 import {
     bundleSizeBytes,
+    previousShardCount,
     shardArtifactType,
     shardCountFor,
     shardIndexForPath,
@@ -45,6 +46,19 @@ describe('shardCountFor', () => {
         })
         it('stopping at sixteen', () => {
             expect(shardCountFor(30 * 1024 * 1024, 185685)).toBe(16)
+        })
+        it('keeping the previous count while it is within a factor of two', () => {
+            // 12,000 paths call for 4; 2 and 8 are close enough to keep, 1 and 16 are not.
+            expect(shardCountFor(0, 12000, 2)).toBe(2)
+            expect(shardCountFor(0, 12000, 8)).toBe(8)
+            expect(shardCountFor(0, 12000, 1)).toBe(4)
+            expect(shardCountFor(0, 12000, 16)).toBe(4)
+            // Hovering either side of a boundary does not move it.
+            expect(shardCountFor(0, 4097, 1)).toBe(1)
+            expect(shardCountFor(0, 4095, 2)).toBe(2)
+        })
+        it('never keeping a previous count that the size has outgrown', () => {
+            expect(shardCountFor(7 * GIB, 12000, 2)).toBe(8)
         })
         it('taking whichever of size and paths needs more', () => {
             expect(shardCountFor(3 * GIB, 12000)).toBe(4)
@@ -174,5 +188,27 @@ describe('bundleSizeBytes', () => {
     it('is unknown when any shard has no recorded size', () => {
         const entries = [entry('transforms-4-0', 'transforms', 100), entry('transforms-4-1', 'transforms', undefined)]
         expect(bundleSizeBytes(entries, 'transforms')).toBeUndefined()
+    })
+})
+
+describe('previousShardCount', () => {
+    const entry = (artifactType: string, bundle?: string): never =>
+        ({artifactType, pattern: '', cacheKey: 'k', layers: undefined, pathCount: 1, bundle}) as never
+
+    it('reads the count from the name a shard was saved under', () => {
+        expect(
+            previousShardCount(
+                [entry('transforms-4-0', 'transforms'), entry('transforms-4-3', 'transforms')],
+                'transforms'
+            )
+        ).toBe(4)
+        expect(previousShardCount([entry('kotlin-dsl-16-2', 'kotlin-dsl')], 'kotlin-dsl')).toBe(16)
+    })
+    it('is one for a bundle saved whole', () => {
+        expect(previousShardCount([entry('transforms')], 'transforms')).toBe(1)
+    })
+    it('is undefined for a bundle that was not saved', () => {
+        expect(previousShardCount([entry('dependencies-4-0', 'dependencies')], 'transforms')).toBeUndefined()
+        expect(previousShardCount([], 'transforms')).toBeUndefined()
     })
 })

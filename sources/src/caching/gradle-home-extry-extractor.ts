@@ -263,14 +263,23 @@ function shardCountOverride(): number | undefined {
 }
 
 /**
- * How many shards to split a bundle into, given the size its archives came to last time and how many paths
- * it matches now.
+ * How many shards to split a bundle into, given the size its archives came to last time, how many paths it
+ * matches now, and how many shards it was split into last time.
  *
  * Enough shards to keep each one under `MAX_SHARD_BYTES` and `MAX_SHARD_PATHS`, and no more. Until a
  * run has reported a size there is nothing to go on, so the first run keeps what this action did before,
  * which is to shard a bundle with enough paths in it and leave a small one whole.
+ *
+ * The path count moves on every run, and a different shard count gives every shard a different key, so
+ * crossing a boundary saves the whole bundle afresh rather than as a layer. The previous count is therefore
+ * kept for as long as it is within a factor of two of the one the paths call for -- between 1024 and 8192
+ * paths a shard -- so that a bundle hovering around a boundary does not re-save itself on every run.
  */
-export function shardCountFor(bundleBytes: number | undefined, matchedPathCount: number): number {
+export function shardCountFor(
+    bundleBytes: number | undefined,
+    matchedPathCount: number,
+    previousCount?: number
+): number {
     const override = shardCountOverride()
     if (override !== undefined) {
         return override
@@ -278,11 +287,31 @@ export function shardCountFor(bundleBytes: number | undefined, matchedPathCount:
     if (bundleBytes === undefined) {
         return matchedPathCount >= 16 * MIN_PATHS_PER_SHARD ? 16 : 1
     }
-    return (
-        SHARD_COUNTS.find(
-            count => bundleBytes / count <= MAX_SHARD_BYTES && matchedPathCount / count <= MAX_SHARD_PATHS
-        ) ?? 16
-    )
+    const forSize = fewestShards(count => bundleBytes / count <= MAX_SHARD_BYTES)
+    const forPaths = fewestShards(count => matchedPathCount / count <= MAX_SHARD_PATHS)
+    const keepPrevious = previousCount !== undefined && previousCount >= forPaths / 2 && previousCount <= forPaths * 2
+    return Math.max(forSize, keepPrevious ? previousCount : forPaths)
+}
+
+function fewestShards(fits: (count: number) => boolean): number {
+    return SHARD_COUNTS.find(fits) ?? SHARD_COUNTS[SHARD_COUNTS.length - 1]
+}
+
+/**
+ * How many shards a bundle was split into when it was last saved, read back from the names its shards were
+ * given; 1 when it was saved whole, and undefined when it was not saved at all.
+ */
+export function previousShardCount(entries: ExtractedCacheEntry[], artifactType: string): number | undefined {
+    for (const entry of entries) {
+        if (entry.artifactType === artifactType) {
+            return 1
+        }
+        if (entry.bundle === artifactType) {
+            const count = Number(entry.artifactType.slice(artifactType.length + 1).split('-')[0])
+            return SHARD_COUNTS.includes(count) ? count : undefined
+        }
+    }
+    return undefined
 }
 
 /**
@@ -453,7 +482,11 @@ abstract class AbstractEntryExtractor {
             }
         }
 
-        const restoreActions: EntryAction[] = []
+        // Every layer is its own action, so that the bound on how much transfers at once counts layers rather
+        // than chains. A chain's layers are queued together and in order, so a layer always starts after the
+        // ones it waits on to extract, and that wait can never hold a slot that one of them needs.
+        const layerActions: (() => Promise<void>)[] = []
+        const outcomes: Promise<ExtractedCacheEntry>[] = []
 
         for (const cacheEntry of previouslyExtractedCacheEntries) {
             const artifactType = cacheEntry.artifactType
@@ -465,7 +498,9 @@ abstract class AbstractEntryExtractor {
                 core.info(`Not restoring extracted cache entry for ${artifactType}`)
                 entryListener.markRequested('SKIP_RESTORE')
             } else {
-                restoreActions.push(async () => this.restoreExtractedCacheEntry(cacheEntry, listener))
+                const chain = this.restoreChain(cacheEntry, listener)
+                layerActions.push(...chain.actions)
+                outcomes.push(chain.outcome)
             }
         }
 
@@ -473,7 +508,8 @@ abstract class AbstractEntryExtractor {
         // later than this was written after its own entry finished restoring, so it is new either way, and
         // taking the earlier of the two times can only classify a path as new that in fact is.
         const restoredAt = Date.now()
-        const entries = await this.runEntryActions(restoreActions)
+        await this.runEntryActions(layerActions)
+        const entries = await Promise.all(outcomes)
 
         for (const directory of createdDirectories) {
             try {
@@ -493,53 +529,73 @@ abstract class AbstractEntryExtractor {
     }
 
     /**
-     * Restores every layer of one entry, extracting them in order so that a later layer's copy of a path wins.
+     * The actions that restore every layer of one entry, and the outcome once they have all run.
      *
-     * Only the extraction is ordered. Every layer is looked up and downloaded at once, and each waits for the
-     * one before it to finish extracting before it extracts: restoring them one after another put a lookup
-     * and a download per layer end to end in front of the entry, which for a full chain is three round
-     * trips more than the base alone.
+     * Only the extraction is ordered, so that a later layer's copy of a path wins: each layer downloads as
+     * soon as it is scheduled, then waits for every layer before it to finish before it extracts. Restoring
+     * them one after another put a lookup and a download per layer end to end in front of the entry, which
+     * for a full chain is three round trips more than the base alone.
      *
      * A chain is only as good as its weakest link: if any layer is missing then the content is incomplete,
-     * so the entry is reported as not restored and the next save replaces it with a fresh base.
+     * so the entry is reported as not restored and the next save replaces it with a fresh base. Layers after
+     * a missing one are then not extracted, and not downloaded if they have not yet started.
      */
-    private async restoreExtractedCacheEntry(
+    private restoreChain(
         cacheEntry: ExtractedCacheEntry,
         listener: CacheListener
-    ): Promise<ExtractedCacheEntry> {
+    ): {actions: (() => Promise<void>)[]; outcome: Promise<ExtractedCacheEntry>} {
         const {artifactType, pattern} = cacheEntry
         const layers = layersOf(cacheEntry)
         const cachePaths = pattern.split('\n')
 
-        let previousExtracted: Promise<unknown> = Promise.resolve()
-        const restores = layers.map(async (layerKey, index) => {
-            const entryListener = listener.entry(layerEntryName(pattern, index))
-            const extractAfter = previousExtracted
-            const restore = restoreCache(cachePaths, layerKey, [], entryListener, async () => {
-                await extractAfter
-            })
-            // Waits for every layer before this one, not just the last: a layer that is missing from the cache
-            // finishes without waiting for its own turn to extract.
-            previousExtracted = Promise.all([extractAfter, restore])
-            return restore
+        let missing: string | undefined
+        let earlierLayersDone: Promise<unknown> = Promise.resolve()
+        const layersDone: Promise<void>[] = []
+
+        const actions = layers.map((layerKey, index) => {
+            const waitFor = earlierLayersDone
+            let markDone = (): void => {}
+            const done = new Promise<void>(resolve => (markDone = resolve))
+            layersDone.push(done)
+            earlierLayersDone = Promise.all([waitFor, done])
+
+            return async (): Promise<void> => {
+                try {
+                    if (missing !== undefined) {
+                        return
+                    }
+                    const entryListener = listener.entry(layerEntryName(pattern, index))
+                    const restored = await restoreCache(cachePaths, layerKey, [], entryListener, async () => {
+                        await waitFor
+                        return missing === undefined
+                    })
+                    if (!restored) {
+                        missing ??= layerKey
+                    }
+                } finally {
+                    // Always, so that a layer which failed outright cannot leave the ones after it waiting.
+                    markDone()
+                }
+            }
         })
 
-        const restored = await Promise.all(restores)
-        const missing = layers.find((_, index) => !restored[index])
-        if (missing) {
-            core.info(`Did not restore ${artifactType} with key ${missing} to ${pattern}`)
-            return new ExtractedCacheEntry(artifactType, pattern, undefined)
-        }
+        const outcome = Promise.all(layersDone).then(() => {
+            if (missing !== undefined) {
+                core.info(`Did not restore ${artifactType} with key ${missing} to ${pattern}`)
+                return new ExtractedCacheEntry(artifactType, pattern, undefined)
+            }
+            return new ExtractedCacheEntry(
+                artifactType,
+                pattern,
+                cacheEntry.cacheKey,
+                layers,
+                cacheEntry.pathCount,
+                cacheEntry.bundle,
+                cacheEntry.baseSizeBytes
+            )
+        })
 
-        return new ExtractedCacheEntry(
-            artifactType,
-            pattern,
-            cacheEntry.cacheKey,
-            layers,
-            cacheEntry.pathCount,
-            cacheEntry.bundle,
-            cacheEntry.baseSizeBytes
-        )
+        return {actions, outcome}
     }
 
     /**
@@ -580,7 +636,11 @@ abstract class AbstractEntryExtractor {
             }
 
             const shardCount = cacheEntryDefinition.shardable
-                ? shardCountFor(bundleSizeBytes(previouslyRestoredEntries, artifactType), matchingFiles.length)
+                ? shardCountFor(
+                      bundleSizeBytes(previouslyRestoredEntries, artifactType),
+                      matchingFiles.length,
+                      previousShardCount(previouslyRestoredEntries, artifactType)
+                  )
                 : 1
 
             if (cacheEntryDefinition.bundle && shardCount > 1) {
@@ -855,7 +915,7 @@ abstract class AbstractEntryExtractor {
      * Runs one at a time when cache debugging is enabled, so that the log stays readable -- which is what
      * the eagerly-awaited promises this replaced were for.
      */
-    private async runEntryActions(actions: EntryAction[]): Promise<ExtractedCacheEntry[]> {
+    private async runEntryActions<T>(actions: (() => Promise<T>)[]): Promise<T[]> {
         const concurrency = isCacheDebuggingEnabled() ? 1 : entryConcurrency()
         cacheDebug(`Processing ${actions.length} cache entries, ${concurrency} at a time`)
         return mapConcurrently(actions, concurrency, async action => action())

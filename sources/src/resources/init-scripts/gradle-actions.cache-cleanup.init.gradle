@@ -1,0 +1,16 @@
+// Applied only to the cleanup build that the action runs before saving the Gradle User Home.
+// The time is passed in as a system property so that this text never changes: Gradle caches a
+// compiled script by its content, and the compiled copy is saved along with the Gradle User Home.
+beforeSettings { settings ->
+    def cleanupTime = Long.parseLong(settings.startParameter.systemPropertiesArgs['gradle.actions.cleanup.time'])
+
+    settings.caches {
+        cleanup = Cleanup.ALWAYS
+
+        releasedWrappers.setRemoveUnusedEntriesOlderThan(cleanupTime)
+        snapshotWrappers.setRemoveUnusedEntriesOlderThan(cleanupTime)
+        downloadedResources.setRemoveUnusedEntriesOlderThan(cleanupTime)
+        createdResources.setRemoveUnusedEntriesOlderThan(cleanupTime)
+        buildCache.setRemoveUnusedEntriesOlderThan(cleanupTime)
+    }
+}
