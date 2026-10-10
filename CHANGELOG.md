@@ -3,6 +3,33 @@
 This is an unofficial derivative of [gradle/actions](https://github.com/gradle/actions). See
 [NOTICE](NOTICE) for attribution and [README](README.md) for why the fork exists.
 
+## Unreleased
+
+### Cache cleanup runs in one JVM, from a script Gradle can cache
+
+The cleanup build runs in the post-action step of every job that succeeds, so its startup is paid on
+nearly every job. Two things made it slower than it needed to be:
+
+- `--no-daemon` did not keep it in one JVM. The launcher starts with `-Xmx64m`, the build asks for
+  Gradle's default daemon arguments, and the mismatch made Gradle fork a single-use daemon. The launcher
+  is now started with the arguments it requests: 4181 ms to 3521 ms.
+- The cleanup time was written into the init script, so the script was compiled afresh every run. It is
+  now passed as a system property, and the compiled script is cached in the Gradle User Home: 4140 ms to
+  3644 ms.
+
+Measured with Gradle 8.14 on Linux. A workflow whose own `GRADLE_OPTS`, `JAVA_OPTS` or
+`org.gradle.java.home` makes the launcher incompatible still forks, as every cleanup did before.
+
+### Measured and rejected
+
+- **`-XX:TieredStopAtLevel=1` for the cleanup JVM.** 550 ms faster on a light cleanup, 60-225 ms slower
+  on one that walked 12k transform directories.
+- **Sharding by path count as well as size.** The transforms bundle is a few megabytes over tens of
+  thousands of files, so size alone leaves it in one entry and one `tar` creates every inode. Restoring
+  it split 4, 8 and 16 ways measured 5004, 5203 and 5971 ms against 6137 ms whole, which is within what
+  the measuring machine drifts: the same restore repeated six times went from 6413 to 13356 ms
+  (`--scenario=repeat`). Worth revisiting on a machine that holds still.
+
 ## v1.2.0
 
 Sharding is now decided by size rather than fixed at sixteen. That is worth doing because v1.1.0's
