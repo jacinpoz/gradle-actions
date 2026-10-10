@@ -17,21 +17,39 @@ describe('shardCountFor', () => {
     // keep one entry from growing unwieldy.
     describe('decides from the size the bundle reached last time', () => {
         it('leaving a bundle whole while it fits in one entry', () => {
-            expect(shardCountFor(0, 100000)).toBe(1)
-            expect(shardCountFor(GIB, 100000)).toBe(1)
+            expect(shardCountFor(0, 4096)).toBe(1)
+            expect(shardCountFor(GIB, 4096)).toBe(1)
         })
         it('splitting it just enough as it grows', () => {
-            expect(shardCountFor(1.5 * GIB, 100000)).toBe(2)
-            expect(shardCountFor(3 * GIB, 100000)).toBe(4)
-            expect(shardCountFor(7 * GIB, 100000)).toBe(8)
-            expect(shardCountFor(12 * GIB, 100000)).toBe(16)
+            expect(shardCountFor(1.5 * GIB, 1000)).toBe(2)
+            expect(shardCountFor(3 * GIB, 1000)).toBe(4)
+            expect(shardCountFor(7 * GIB, 1000)).toBe(8)
+            expect(shardCountFor(12 * GIB, 1000)).toBe(16)
         })
         it('stopping at sixteen, however large it gets', () => {
             expect(shardCountFor(50 * GIB, 100000)).toBe(16)
             expect(shardCountFor(500 * GIB, 100000)).toBe(16)
         })
-        it('ignoring the path count once a size is known', () => {
+        it('taking the size alone when the path count is small', () => {
             expect(shardCountFor(4 * GIB, 1)).toBe(4)
+        })
+    })
+
+    // Extraction is one 'tar' creating every path, so a bundle of many small paths is split however few
+    // bytes it holds: 'transforms' is a few megabytes over tens of thousands of directories.
+    describe('splits a bundle of many paths whatever its size', () => {
+        it('just enough to keep each shard to 4096 paths', () => {
+            expect(shardCountFor(0, 4097)).toBe(2)
+            expect(shardCountFor(3 * 1024 * 1024, 12000)).toBe(4)
+            expect(shardCountFor(3 * 1024 * 1024, 32768)).toBe(8)
+        })
+        it('stopping at sixteen', () => {
+            expect(shardCountFor(30 * 1024 * 1024, 185685)).toBe(16)
+        })
+        it('taking whichever of size and paths needs more', () => {
+            expect(shardCountFor(3 * GIB, 12000)).toBe(4)
+            expect(shardCountFor(7 * GIB, 12000)).toBe(8)
+            expect(shardCountFor(GIB, 20000)).toBe(8)
         })
     })
 
