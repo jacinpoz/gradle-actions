@@ -102,7 +102,6 @@ export class CacheCleaner {
             '-I',
             'init.gradle',
             `-Dgradle.actions.cleanup.time=${cleanTimestamp}`,
-            `-Dorg.gradle.jvmargs=${CLEANUP_JVM_ARGS.join(' ')}`,
             '--info',
             '--no-daemon',
             '--no-scan',
@@ -112,13 +111,29 @@ export class CacheCleaner {
             'noop'
         ]
 
+        // A Gradle User Home that sets its own JVM arguments -- a larger heap for a large cache, say -- keeps
+        // them, and the cleanup forks a daemon to honour them as it always did.
+        if (this.gradleUserHomeSetsJvmArgs()) {
+            await exec.exec(executable, args, {cwd: cleanupProjectDir})
+            return
+        }
+
         // Appended to the job's own GRADLE_OPTS -- a proxy, say -- and later than the launcher script's heap
         // settings, which these then take precedence over.
         const gradleOpts = [process.env['GRADLE_OPTS'], ...CLEANUP_JVM_ARGS].filter(Boolean).join(' ')
-        await exec.exec(executable, args, {
+        await exec.exec(executable, [`-Dorg.gradle.jvmargs=${CLEANUP_JVM_ARGS.join(' ')}`, ...args], {
             cwd: cleanupProjectDir,
             env: {...process.env, GRADLE_OPTS: gradleOpts} as {[key: string]: string}
         })
+    }
+
+    private gradleUserHomeSetsJvmArgs(): boolean {
+        try {
+            const properties = fs.readFileSync(path.resolve(this.gradleUserHome, 'gradle.properties'), 'utf-8')
+            return /^\s*org\.gradle\.jvmargs\s*[=:]/m.test(properties)
+        } catch {
+            return false
+        }
     }
 }
 

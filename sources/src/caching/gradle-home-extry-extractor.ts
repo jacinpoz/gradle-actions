@@ -272,8 +272,8 @@ function shardCountOverride(): number | undefined {
  *
  * The path count moves on every run, and a different shard count gives every shard a different key, so
  * crossing a boundary saves the whole bundle afresh rather than as a layer. The previous count is therefore
- * kept for as long as it is within a factor of two of the one the paths call for -- between 1024 and 8192
- * paths a shard -- so that a bundle hovering around a boundary does not re-save itself on every run.
+ * kept for as long as it leaves each shard between 1024 and 8192 paths, so that a bundle hovering around a
+ * boundary does not re-save itself on every run.
  */
 export function shardCountFor(
     bundleBytes: number | undefined,
@@ -289,7 +289,10 @@ export function shardCountFor(
     }
     const forSize = fewestShards(count => bundleBytes / count <= MAX_SHARD_BYTES)
     const forPaths = fewestShards(count => matchedPathCount / count <= MAX_SHARD_PATHS)
-    const keepPrevious = previousCount !== undefined && previousCount >= forPaths / 2 && previousCount <= forPaths * 2
+    const keepPrevious =
+        previousCount !== undefined &&
+        matchedPathCount / previousCount <= MAX_SHARD_PATHS * 2 &&
+        (previousCount === 1 || matchedPathCount / previousCount >= MAX_SHARD_PATHS / 4)
     return Math.max(forSize, keepPrevious ? previousCount : forPaths)
 }
 
@@ -483,9 +486,10 @@ abstract class AbstractEntryExtractor {
         }
 
         // Every layer is its own action, so that the bound on how much transfers at once counts layers rather
-        // than chains. A chain's layers are queued together and in order, so a layer always starts after the
-        // ones it waits on to extract, and that wait can never hold a slot that one of them needs.
-        const layerActions: (() => Promise<void>)[] = []
+        // than chains. They are queued by depth -- every base, then every second layer, and so on -- so that a
+        // layer waiting for the ones beneath it to extract does not hold a slot before every base has started,
+        // and so that a layer always starts after the ones it waits on, which can then never need its slot.
+        const chainActions: (() => Promise<void>)[][] = []
         const outcomes: Promise<ExtractedCacheEntry>[] = []
 
         for (const cacheEntry of previouslyExtractedCacheEntries) {
@@ -499,7 +503,7 @@ abstract class AbstractEntryExtractor {
                 entryListener.markRequested('SKIP_RESTORE')
             } else {
                 const chain = this.restoreChain(cacheEntry, listener)
-                layerActions.push(...chain.actions)
+                chainActions.push(chain.actions)
                 outcomes.push(chain.outcome)
             }
         }
@@ -508,6 +512,10 @@ abstract class AbstractEntryExtractor {
         // later than this was written after its own entry finished restoring, so it is new either way, and
         // taking the earlier of the two times can only classify a path as new that in fact is.
         const restoredAt = Date.now()
+        const depth = Math.max(0, ...chainActions.map(actions => actions.length))
+        const layerActions = Array.from({length: depth}, (_, index) =>
+            chainActions.flatMap(actions => (index < actions.length ? [actions[index]] : []))
+        ).flat()
         await this.runEntryActions(layerActions)
         const entries = await Promise.all(outcomes)
 
@@ -537,8 +545,8 @@ abstract class AbstractEntryExtractor {
      * for a full chain is three round trips more than the base alone.
      *
      * A chain is only as good as its weakest link: if any layer is missing then the content is incomplete,
-     * so the entry is reported as not restored and the next save replaces it with a fresh base. Layers after
-     * a missing one are then not extracted, and not downloaded if they have not yet started.
+     * so the entry is reported as not restored and the next save replaces it with a fresh base. The layers
+     * beneath a missing one are still extracted; those after it are not, nor downloaded if not yet started.
      */
     private restoreChain(
         cacheEntry: ExtractedCacheEntry,
@@ -548,7 +556,9 @@ abstract class AbstractEntryExtractor {
         const layers = layersOf(cacheEntry)
         const cachePaths = pattern.split('\n')
 
-        let missing: string | undefined
+        // The first layer found missing. A layer declines to extract only when one beneath it is missing:
+        // the layers beneath a missing one still make for a mostly warm Gradle User Home.
+        let missingIndex = layers.length
         let earlierLayersDone: Promise<unknown> = Promise.resolve()
         const layersDone: Promise<void>[] = []
 
@@ -561,16 +571,21 @@ abstract class AbstractEntryExtractor {
 
             return async (): Promise<void> => {
                 try {
-                    if (missing !== undefined) {
+                    if (missingIndex < index) {
                         return
                     }
                     const entryListener = listener.entry(layerEntryName(pattern, index))
+                    let declined = false
                     const restored = await restoreCache(cachePaths, layerKey, [], entryListener, async () => {
                         await waitFor
-                        return missing === undefined
+                        declined = missingIndex < index
+                        return !declined
                     })
+                    if (declined) {
+                        entryListener.markNotRestored('not extracted: a layer beneath it is missing')
+                    }
                     if (!restored) {
-                        missing ??= layerKey
+                        missingIndex = Math.min(missingIndex, index)
                     }
                 } finally {
                     // Always, so that a layer which failed outright cannot leave the ones after it waiting.
@@ -580,8 +595,8 @@ abstract class AbstractEntryExtractor {
         })
 
         const outcome = Promise.all(layersDone).then(() => {
-            if (missing !== undefined) {
-                core.info(`Did not restore ${artifactType} with key ${missing} to ${pattern}`)
+            if (missingIndex < layers.length) {
+                core.info(`Did not restore ${artifactType} with key ${layers[missingIndex]} to ${pattern}`)
                 return new ExtractedCacheEntry(artifactType, pattern, undefined)
             }
             return new ExtractedCacheEntry(

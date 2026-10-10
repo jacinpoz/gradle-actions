@@ -211,6 +211,21 @@ describe('an extracted entry over successive jobs', () => {
         expect(metadata().entries.find(x => x.artifactType === 'transforms')?.layers).toBeUndefined()
     })
 
+    // A missing layer makes the chain incomplete, but what lies beneath it is still worth having.
+    it('still extracts the layers beneath a missing one', async () => {
+        addTransforms(INITIAL, {aged: true})
+        await extractor().extract(new CacheListener())
+        await extractor().restore(new CacheListener())
+        addTransforms(['9f8e7d6c'])
+        await extractor().extract(new CacheListener())
+        const layers = transformsEntry().layers!
+        expect(layers).toHaveLength(2)
+
+        archives.delete(layers[1])
+        await extractor().restore(new CacheListener())
+        expect(transformsPresent()).toEqual([...INITIAL].sort())
+    })
+
     it('saves nothing at all when the content has not changed', async () => {
         addTransforms(INITIAL, {aged: true})
         await extractor().extract(new CacheListener())

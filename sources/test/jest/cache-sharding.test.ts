@@ -57,6 +57,10 @@ describe('shardCountFor', () => {
             expect(shardCountFor(0, 4097, 1)).toBe(1)
             expect(shardCountFor(0, 4095, 2)).toBe(2)
         })
+        it('dropping a previous count that leaves shards too small, whatever set it', () => {
+            // Split in two when it was large; now 50 paths and well under a gigabyte.
+            expect(shardCountFor(200 * 1024 * 1024, 50, 2)).toBe(1)
+        })
         it('never keeping a previous count that the size has outgrown', () => {
             expect(shardCountFor(7 * GIB, 12000, 2)).toBe(8)
         })
