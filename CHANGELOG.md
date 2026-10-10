@@ -3,7 +3,33 @@
 This is an unofficial derivative of [gradle/actions](https://github.com/gradle/actions). See
 [NOTICE](NOTICE) for attribution and [README](README.md) for why the fork exists.
 
-## Unreleased
+## v1.3.0
+
+Restoring and cleaning up the Gradle User Home, each made cheaper where the time actually went: in the
+JVMs the cleanup started, in a single `tar` creating every transform directory, and in the round trips a
+chain of layers waited on one after another.
+
+### Bundles of many small paths are split by path count, not only size
+
+Restoring an entry is one `tar` creating every path in it, which is bound by how many paths there are, not
+how many bytes. `transforms` is a few megabytes over tens of thousands of directories, so v1.2.0's
+size-only rule left it in one entry and that one `tar` became the longest step of the restore.
+
+A shard now holds at most 4096 matched paths. Extracting 12,000 transform directories measured
+1216-1590 ms as one archive against 632-671 ms as four extracted at once, on four cores; eight and sixteen
+were no faster than four. A real Gradle User Home holding ~186k transform directories is split sixteen ways.
+
+The path count moves on every run, and a new shard count saves the bundle afresh rather than as a layer,
+so the previous count is kept while it leaves each shard between 1024 and 8192 paths.
+
+### Every layer of a chain downloads at once
+
+Layers were restored one after another, so a full chain put a lookup and a download per layer end to end
+in front of its entry. They now all download at once, and each extracts once every layer beneath it has,
+so a later layer's copy of a path still wins. Each layer counts against the limit on how many entries
+transfer at once, bases first.
+
+When a layer is missing, the layers beneath it are still extracted and those above it are not.
 
 ### Cache cleanup runs in one JVM, from a script Gradle can cache
 
@@ -17,18 +43,33 @@ nearly every job. Two things made it slower than it needed to be:
   now passed as a system property, and the compiled script is cached in the Gradle User Home: 4140 ms to
   3644 ms.
 
-Measured with Gradle 8.14 on Linux. A workflow whose own `GRADLE_OPTS`, `JAVA_OPTS` or
-`org.gradle.java.home` makes the launcher incompatible still forks, as every cleanup did before.
+Measured with Gradle 8.14 on Linux. A Gradle User Home whose `gradle.properties` sets
+`org.gradle.jvmargs` keeps those arguments, and its cleanup forks as before; so does one whose
+`GRADLE_OPTS`, `JAVA_OPTS` or `org.gradle.java.home` makes the launcher incompatible.
+
+### What this costs once
+
+`transforms`, and any other bundle of more than 4096 paths, changes shard count on the first job that
+saves after upgrading, and that job saves it in full. Like v1.2.0's change, this is paid once.
 
 ### Measured and rejected
 
 - **`-XX:TieredStopAtLevel=1` for the cleanup JVM.** 550 ms faster on a light cleanup, 60-225 ms slower
   on one that walked 12k transform directories.
-- **Sharding by path count as well as size.** The transforms bundle is a few megabytes over tens of
-  thousands of files, so size alone leaves it in one entry and one `tar` creates every inode. Restoring
-  it split 4, 8 and 16 ways measured 5004, 5203 and 5971 ms against 6137 ms whole, which is within what
-  the measuring machine drifts: the same restore repeated six times went from 6413 to 13356 ms
-  (`--scenario=repeat`). Worth revisiting on a machine that holds still.
+- **Overlapping a download with its extraction.** Extracting all 66 entries of the harness fixture took
+  218 ms eight at a time, so there was little to overlap.
+- **Cleaning up only on jobs whose save rewrites a base.** Deletions only reach an extracted entry when its
+  base is rewritten, but a stale wrapper distribution or JDK would then be restored by every job until the
+  next cleanup.
+
+### Measuring
+
+The harness's end-to-end restore timings drifted on the machine these were measured on: the same restore
+repeated six times went from 6413 to 13356 ms. `--scenario=repeat` now shows that drift, and the numbers
+above are from interleaved or best-of measurements of the mechanism itself rather than from the drifting
+end-to-end runs.
+
+**Full changelog**: https://github.com/jacinpoz/gradle-actions/compare/v1.2.0...v1.3.0
 
 ## v1.2.0
 

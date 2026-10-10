@@ -49,6 +49,10 @@ content is recognised by its modification time, because `tar` restores the time 
 nothing about the restored content has to be stored to compare against. A chain is collapsed back into one
 entry when it is full, or when cache cleanup has pruned much of what it restored.
 
+**Cache cleanup starts one JVM, not two.** `--no-daemon` still forked a single-use daemon, because the
+launcher's JVM arguments did not match the ones the build asked for, and its init script was compiled
+afresh on every run. Together about a second off the post-action step of every job that cleans up.
+
 **The local build cache is cached separately.** `caches/build-cache-1` is named by content hash like the
 other large directories, but upstream leaves it inside the main Gradle User Home entry, which is keyed on
 the commit and so is re-uploaded in full on every run.
@@ -76,6 +80,8 @@ was replaced by a pattern match for the one directory-index scrape that used it.
 | Time to save it | 2206 ms | 580 ms |
 | Saving 66 entries | 3051 ms | 2693 ms |
 | Restoring a Gradle User Home, at 50 ms latency | 3924 ms | 2593 ms |
+| Extracting 12k transform directories | one `tar`: 1216-1590 ms | four at once: 632-671 ms |
+| Cache cleanup build, every successful job | ~4.8 s, two JVMs | ~3.6 s, one JVM |
 | Extracted-entry caching on Windows | broken | working |
 
 The first four rows are measured against a Gradle User Home with ~178k transform directories. A small cache
