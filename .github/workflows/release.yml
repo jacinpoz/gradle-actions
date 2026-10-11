@@ -3,9 +3,8 @@ name: Release
 # Tags a release, moves its major-version tag, and publishes the GitHub release, following RELEASING.md.
 #
 # Run by hand from main. GitHub only lets people with write access run a workflow, and the first step below
-# refuses anyone but the repository owner. That check lives in this file, so a collaborator with write access
-# could run an edited copy from another branch: what holds against that is the 'release' environment's
-# protection rules and a tag ruleset, which are repository settings (see RELEASING.md).
+# refuses anyone but the repository owner. That check lives in this file, so it opens no route that write
+# access does not already give; the 'release' environment can add a required reviewer (see RELEASING.md).
 #
 # Tags pushed from here are annotated but not signed.
 

@@ -14,13 +14,11 @@
 
 The `Release` workflow (`.github/workflows/release.yml`) does the tagging, the major-version tag and the
 GitHub release below in one run: start it by hand from `main` with the version to release. It refuses
-anyone but the repository owner, but that check lives in the workflow file itself, so a collaborator with
-write access could run an edited copy. Two repository settings enforce it independently of the file:
-
-- Settings → Environments → `release`: add the owner as a required reviewer, and limit deployment branches
-  to `main`.
-- Settings → Rules → Rulesets: a tag ruleset on `v*` restricting creation, update and deletion, with only
-  repository admins allowed to bypass.
+anyone but the repository owner. That check lives in the workflow file, so it opens no route that write
+access does not already give: anyone who can run workflows here can push tags directly. Keeping releases
+to the owner therefore comes down to who has write access. To also require the owner's sign-off on each
+run, add the owner as a required reviewer of the `release` environment (Settings → Environments), with
+deployment branches limited to `main`.
 
 The tags it pushes are annotated but not signed, and only the newest version moves the major-version tag or
 becomes the latest release. The steps below are the
