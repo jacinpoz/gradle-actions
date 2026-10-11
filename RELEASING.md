@@ -13,8 +13,17 @@
 ## Release gradle/actions
 
 The `Release` workflow (`.github/workflows/release.yml`) does the tagging, the major-version tag and the
-GitHub release below in one run: start it by hand from `main` with the version to release. Only the
-repository owner can run it, and the tags it pushes are annotated but not signed. The steps below are the
+GitHub release below in one run: start it by hand from `main` with the version to release. It refuses
+anyone but the repository owner, but that check lives in the workflow file itself, so a collaborator with
+write access could run an edited copy. Two repository settings enforce it independently of the file:
+
+- Settings → Environments → `release`: add the owner as a required reviewer, and limit deployment branches
+  to `main`.
+- Settings → Rules → Rulesets: a tag ruleset on `v*` restricting creation, update and deletion, with only
+  repository admins allowed to bypass.
+
+The tags it pushes are annotated but not signed, and only the newest version moves the major-version tag or
+becomes the latest release. The steps below are the
 manual equivalent.
 
 - Create a tag for the release. The tag should have the format `v5.0.0`
