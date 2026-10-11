@@ -11,6 +11,12 @@
   - Note: The gradle actions follow the GitHub Actions convention of including a .0 patch number for the first release of a minor version, unlike the Gradle convention which omits the trailing .0.
 
 ## Release gradle/actions
+
+The `Release` workflow (`.github/workflows/release.yml`) does the tagging, the major-version tag and the
+GitHub release below in one run: start it by hand from `main` with the version to release. Only the
+repository owner can run it, and the tags it pushes are annotated but not signed. The steps below are the
+manual equivalent.
+
 - Create a tag for the release. The tag should have the format `v5.0.0`
   - From CLI: `git tag -s -m "v5.0.0" v5.0.0 && git push --tags`
   - Note that we sign the tag and set the commit message for the tag to the newly released version.
