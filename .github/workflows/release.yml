@@ -1,0 +1,136 @@
+name: Release
+
+# Tags a release, moves its major-version tag, and publishes the GitHub release, following RELEASING.md.
+#
+# Run by hand from main. GitHub only lets people with write access run a workflow, and the first step below
+# refuses anyone but the repository owner. That check lives in this file, so it opens no route that write
+# access does not already give; the 'release' environment can add a required reviewer (see RELEASING.md).
+#
+# Tags pushed from here are annotated but not signed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 1.3.0)'
+        required: true
+      commit:
+        description: 'Commit on main to release (defaults to the commit this run was started on)'
+        required: false
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+    - name: Check who is releasing, and from where
+      env:
+        ACTOR: ${{ github.actor }}
+        TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        OWNER: ${{ github.repository_owner }}
+        REF: ${{ github.ref }}
+      run: |
+        if [[ "$ACTOR" != "$OWNER" || "$TRIGGERING_ACTOR" != "$OWNER" ]]; then
+          echo "::error::Only $OWNER may release; this run was started by $TRIGGERING_ACTOR."
+          exit 1
+        fi
+        if [[ "$REF" != "refs/heads/main" ]]; then
+          echo "::error::Releases are run from main, not $REF."
+          exit 1
+        fi
+
+    - name: Checkout sources
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        fetch-depth: 0
+
+    - name: Check the version and the commit
+      env:
+        REQUESTED_COMMIT: ${{ inputs.commit }}
+      run: |
+        if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::'$VERSION' is not a version of the form 1.2.3."
+          exit 1
+        fi
+
+        # Pinned to a full SHA here, so that every later step releases exactly the commit that was checked.
+        REQUESTED="${REQUESTED_COMMIT:-$GITHUB_SHA}"
+        if ! COMMIT="$(git rev-parse --verify --end-of-options "$REQUESTED^{commit}" 2>/dev/null)"; then
+          echo "::error::'$REQUESTED' is not a commit."
+          exit 1
+        fi
+        if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+          echo "::error::$COMMIT is not on main."
+          exit 1
+        fi
+
+        # A tag already at this commit is a previous run that stopped part-way, which this run finishes.
+        if EXISTING="$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}")" && [[ "$EXISTING" != "$COMMIT" ]]; then
+          echo "::error::v$VERSION already exists, at $EXISTING."
+          exit 1
+        fi
+        if gh release view "v$VERSION" >/dev/null 2>&1; then
+          echo "::error::The v$VERSION release has already been published."
+          exit 1
+        fi
+
+        PACKAGE_VERSION="$(git show "$COMMIT:sources/package.json" | jq -r .version)"
+        if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+          echo "::error::sources/package.json at $COMMIT is version $PACKAGE_VERSION, not $VERSION."
+          exit 1
+        fi
+
+        git show "$COMMIT:CHANGELOG.md" | tr -d '\r' | awk -v heading="## v$VERSION" '
+          { sub(/[ \t]+$/, "") }
+          $0 == heading { found = 1; next }
+          found && /^## v/ { exit }
+          found { print }
+        ' > "$RUNNER_TEMP/notes.md"
+        if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+          echo "::error::CHANGELOG.md at $COMMIT has no notes under '## v$VERSION'."
+          exit 1
+        fi
+
+        # Only the newest version moves the major-version tag and becomes the latest release: releasing a
+        # fix to an older line must not take '@v1' users back to it.
+        MAJOR="v${VERSION%%.*}"
+        NEWEST_IN_MAJOR="$( (git tag -l "$MAJOR.*.*"; echo "v$VERSION") | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+        NEWEST="$( (git tag -l 'v*.*.*'; echo "v$VERSION") | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+
+        {
+          echo "RELEASE_COMMIT=$COMMIT"
+          echo "MAJOR_TAG=$MAJOR"
+          echo "MOVE_MAJOR=$([[ "$NEWEST_IN_MAJOR" == "v$VERSION" ]] && echo true || echo false)"
+          echo "LATEST=$([[ "$NEWEST" == "v$VERSION" ]] && echo true || echo false)"
+        } >> "$GITHUB_ENV"
+
+    - name: Tag the release and move the major-version tag
+      run: |
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        REFS=()
+        if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+          git tag -a -m "v$VERSION" "v$VERSION" "$RELEASE_COMMIT"
+          REFS+=("refs/tags/v$VERSION")
+        fi
+        if [[ "$MOVE_MAJOR" == "true" ]]; then
+          git tag -f -a -m "v$VERSION" "$MAJOR_TAG" "$RELEASE_COMMIT"
+          REFS+=("+refs/tags/$MAJOR_TAG")
+        else
+          echo "Not moving $MAJOR_TAG: a newer $MAJOR_TAG release already exists."
+        fi
+        if [[ ${#REFS[@]} -gt 0 ]]; then
+          git push --atomic origin "${REFS[@]}"
+        fi
+
+    - name: Publish the GitHub release
+      run: |
+        gh release create "v$VERSION" --title "v$VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+          --verify-tag --latest="$LATEST"
